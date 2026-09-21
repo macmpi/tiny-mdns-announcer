@@ -1,0 +1,6 @@
+SPDXVersion: SPDX-2.1
+DataLicense: CC0-1.0
+PackageName: tiny-mdns-announcer
+PackageOriginator: macmpi
+PackageHomePage: https://github.com/macmpi/tiny-mdns-announcer
+PackageLicenseDeclared: MIT

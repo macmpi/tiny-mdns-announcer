@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright 2026, macmpi
+# SPDX-License-Identifier: MIT
+
+[Unit]
+Description=Announcement-only mDNS hostname and service announcer
+Wants=network-online.target
+After=network-online.target
+After=syslog.service
+Conflicts=shutdown.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/tiny-mdns-ann
+ExecStart=/bin/sh -c 'exec /usr/bin/tiny-mdns-ann ${OPTS}'
+
+Restart=always
+RestartSec=5s
+
+# The script writes status messages to stderr/stdout.
+StandardOutput=journal
+StandardError=journal
+
+# Give the process time to stop.
+TimeoutStopSec=10s
+
+[Install]
+WantedBy=multi-user.target
