@@ -50,24 +50,24 @@ alias _logger='logger -st "$SCRIPT"'
 # Base configuration
 # ----------------------------------------------------------------------
 
+: "${HOSTNAME:=$(hostname 2>/dev/null || printf '%s' my-host)}"
+
+: "${ADVERTISE_HTTP:=0}"
+: "${HTTP_PORT:=80}"
+: "${HTTP_PATH:=/}"
+
+: "${ADVERTISE_SSH:=0}"
+: "${SSH_PORT:=22}"
+
 : "${INTERVAL:=60}"
 : "${ADVERTISE_IPV6:=1}"
 : "${USE_SOURCE_ADDRESS:=1}"
-
-: "${HOSTNAME:=$(hostname 2>/dev/null || printf '%s' mybox)}"
+: "${DEBUG_LOG:=0}"
 
 MDNS_GROUP4="224.0.0.251"
 MDNS_GROUP6="ff02::fb"
 MDNS_PORT=5353
 DNS_TTL=120
-
-ADVERTISE_HTTP=0
-HTTP_PORT=80
-HTTP_PATH="/"
-
-ADVERTISE_SSH=0
-SSH_PORT=22
-
 
 # ----------------------------------------------------------------------
 # Convert IPv4 address to hexadecimal bytes.
@@ -438,7 +438,9 @@ announce_address()
 			;;
 	esac
 
-	_logger "Announcing ${HOSTNAME}.local -> ${ip_address} via ${iface} (IPv${family})"
+	if [ "$DEBUG_LOG" -eq 1 ]; then
+		_logger "Announcing ${HOSTNAME}.local -> ${ip_address} via ${iface} (IPv${family})"
+	fi
 
 	send_payload "$payload" "$source_address" \
 		"$destination_address" || return 1
@@ -582,6 +584,7 @@ Environment:
   ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
   INTERVAL            Announcement interval, default 60.
   USE_SOURCE_ADDRESS  Use nc -s, default 1.
+  DEBUG_LOG	          Log each announcement, default 0.
 
 Notes:
   IPv6 link-local multicast requires interface scoping; this is handled
@@ -669,16 +672,17 @@ case "$INTERVAL:$MDNS_PORT:$DNS_TTL:$SSH_PORT:$HTTP_PORT" in
 		;;
 esac
 
-case "$ADVERTISE_IPV6:$ADVERTISE_SSH:$ADVERTISE_HTTP:$USE_SOURCE_ADDRESS" in
+case "$ADVERTISE_IPV6:$ADVERTISE_SSH:$ADVERTISE_HTTP:$USE_SOURCE_ADDRESS:$DEBUG_LOG" in
 	*[!01:]*)
 		usage 1 "Feature flags must be 0 or 1."
 		;;
 esac
 
 
-_logger "Starting mDNS announcer v$VERSION by macmpi for ${HOSTNAME}.local"
-_logger "IPv6 announcements: ${ADVERTISE_IPV6}"
-
+_logger "Starting Tiny mDNS announcer v$VERSION by macmpi for ${HOSTNAME}.local"
+if [ "$DEBUG_LOG" -eq 1 ]; then
+	_logger "IPv6 announcements: ${ADVERTISE_IPV6}"
+fi
 # Initial announcement burst.
 send_all_announcements
 sleep 1

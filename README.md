@@ -11,11 +11,11 @@ It merely sends unsolicited UDP announcement packets, and does not answer querie
 - hostname LAN IP address resolution
 - optionally advertises `http` and `ssh` services
 - IPv4 and IPv6 support
-- openRC and Systemd services
+- OpenRC and Systemd services
 
 ## Benefits:
 - extremely small footprint
-- run under POSIX shell
+- runs under POSIX shell
 - compatible with busybox's bundled `netcat`
 
 ## Setup procedure:
@@ -35,6 +35,7 @@ Environment:
   ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
   INTERVAL            Announcement interval, default 60.
   USE_SOURCE_ADDRESS  Use nc -s, default 1.
+  DEBUG_LOG	          Log each announcement, default 0.
 
 Notes:
   IPv6 link-local multicast requires interface scoping; this is handled

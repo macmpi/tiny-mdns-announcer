@@ -11,7 +11,7 @@ Conflicts=shutdown.target
 [Service]
 Type=simple
 EnvironmentFile=/etc/default/tiny-mdns-ann
-ExecStart=/bin/sh -c 'exec /usr/bin/tiny-mdns-ann ${OPTS}'
+ExecStart=/usr/bin/tiny-mdns-ann
 
 Restart=always
 RestartSec=5s
