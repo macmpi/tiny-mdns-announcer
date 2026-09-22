@@ -10,6 +10,7 @@ It merely sends unsolicited UDP announcement packets, and does not answer querie
 ## Features:
 - hostname LAN IP address resolution
 - optionally advertises `http` and `ssh` services
+- IPv4 and IPv6 support
 - openRC and Systemd services
 
 ## Benefits:
@@ -20,17 +21,26 @@ It merely sends unsolicited UDP announcement packets, and does not answer querie
 ## Setup procedure:
 Make script executable and run `tiny-mdns-ann` on device as follows:
 ```
-usage: tiny-mdns-ann [--host <host-name>] [--http[=port]] [--ssh[=port]]
+usage: tiny-mdns-ann [OPTIONS]
 
-Simply annonces hostname.local IP address over mdns/avahi on LAN,
-and optionally advertizes http (port 80) and/or ssh (port 22) services.
-Only requires netcat from Busybox or standalone nc utility.
-Lowest footprint & best-effort unsolicited announcer (not a mdns responder).
+Announce HOSTNAME.local over mDNS on active interfaces.
 
-Options: --help              Help information and usage
-         --host <host-name>  Specify host name to be announced in .local domain
-         --http[=port]       Announce http service (port 80 by default)
-         --ssh[=port]        Announce ssh service (port 22 by default)
+Options:
+  --help              Show this help.
+  --host NAME         Host name to announce in the .local domain.
+  --http[=PORT]       Advertise HTTP, default port 80.
+  --ssh[=PORT]        Advertise SSH, default port 22.
+
+Environment:
+  ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
+  INTERVAL            Announcement interval, default 60.
+  USE_SOURCE_ADDRESS  Use nc -s, default 1.
+
+Notes:
+  IPv6 link-local multicast requires interface scoping; this is handled
+  automatically by the announcer.
+  BusyBox nc may not expose multicast TTL/hop-limit controls, so
+  announcements may not use the mDNS-required value of 255.
 ```
 Main execution steps are logged: `grep tiny-mdns-ann /var/log/messages`.
 

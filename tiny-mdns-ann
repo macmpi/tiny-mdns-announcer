@@ -6,35 +6,58 @@
 # BusyBox/POSIX sh mDNS announcement-only script.
 #
 # Announces:
-#   HOSTNAME.local -> every active IPv4 address
+#   HOSTNAME.local -> all active IPv4 addresses
+#   HOSTNAME.local -> all active IPv6 addresses
 #
 # Optional services:
 #   SSH  (_ssh._tcp.local)
 #   HTTP (_http._tcp.local)
 #
+# IPv6 announcements are enabled by default and can be disabled with:
+#
+#   ADVERTISE_IPV6=0 ./tiny-mdns-ann
+#
 # This sends unsolicited announcements only. It does not answer queries.
 #
+# IPv6 requires an nc implementation that accepts scoped IPv6 addresses,
+# for example:
+#
+#   nc -u -p 5353 -s 'fe80::1%wlan0' -w 1 \
+#      'ff02::fb%wlan0' 5353
+#
+# BusyBox nc does not expose IP_MULTICAST_TTL or IPV6_MULTICAST_HOPS.
+# Consequently, IPv4 and IPv6 packets may not use the mDNS-required
+# TTL/hop limit of 255.
 
-
-VERSION="0.3"
+VERSION="0.4"
 
 SCRIPT="${0##*/}"
-error() {
-	echo "$SCRIPT: $1" >&2
+
+error()
+{
+	echo "$SCRIPT: $*" >&2
 }
 
-! [ "$(id -u)" -eq 0 ] && { error "Please run with administrator privileges."; exit 1; }
+if [ "$(id -u)" -ne 0 ]; then
+	error "Please run with administrator privileges."
+	exit 1
+fi
 
 alias _logger='logger -st "$SCRIPT"'
 
 
 # ----------------------------------------------------------------------
-# Base Configuration
+# Base configuration
 # ----------------------------------------------------------------------
 
 : "${INTERVAL:=60}"
+: "${ADVERTISE_IPV6:=1}"
+: "${USE_SOURCE_ADDRESS:=1}"
 
-MDNS_GROUP="224.0.0.251"
+: "${HOSTNAME:=$(hostname 2>/dev/null || printf '%s' mybox)}"
+
+MDNS_GROUP4="224.0.0.251"
+MDNS_GROUP6="ff02::fb"
 MDNS_PORT=5353
 DNS_TTL=120
 
@@ -45,28 +68,114 @@ HTTP_PATH="/"
 ADVERTISE_SSH=0
 SSH_PORT=22
 
-# Set to 0 if this BusyBox nc does not support -s.
-: "${USE_SOURCE_ADDRESS:=1}"
-
 
 # ----------------------------------------------------------------------
-# Convert IPv4 address to hexadecimal bytes
+# Convert IPv4 address to hexadecimal bytes.
 # ----------------------------------------------------------------------
 
 ipv4_to_hex()
 {
-    ip_address=$1
+	ip_address=$1
 
-    old_ifs=$IFS
-    IFS=.
-    # The value comes from "ip", so it does not contain shell globbing.
-    # shellcheck disable=SC2086
-    set -- $ip_address
-    IFS=$old_ifs
+	old_ifs=$IFS
+	IFS=.
+	# The value is obtained from ip(8).
+	# shellcheck disable=SC2086
+	set -- $ip_address
+	IFS=$old_ifs
 
-    [ "$#" -eq 4 ] || return 1
+	[ "$#" -eq 4 ] || return 1
 
-    printf '%02x%02x%02x%02x' "$1" "$2" "$3" "$4"
+	printf '%02x%02x%02x%02x' "$1" "$2" "$3" "$4"
+}
+
+
+# ----------------------------------------------------------------------
+# Convert an IPv6 address to 32 hexadecimal digits.
+#
+# The input must not contain a prefix length or zone identifier.
+# ----------------------------------------------------------------------
+
+ipv6_to_hex()
+{
+	ip_address=$1
+
+	case "$ip_address" in
+		*/*|*%*)
+			return 1
+			;;
+	esac
+
+	awk '
+	function valid_hextet(value) {
+		return value != "" &&
+			length(value) <= 4 &&
+			value ~ /^[[:xdigit:]]+$/
+	}
+
+	function count_part(part,    count, values, i) {
+		if (part == "")
+			return 0
+
+		count = split(part, values, ":")
+
+		for (i = 1; i <= count; i++) {
+			if (!valid_hextet(values[i]))
+				exit 1
+		}
+
+		return count
+	}
+
+	function emit_part(part,    count, values, i, value) {
+		if (part == "")
+			return
+
+		count = split(part, values, ":")
+
+		for (i = 1; i <= count; i++) {
+			value = values[i]
+			printf "%s", substr("0000" value, length("0000" value) - 3)
+		}
+	}
+
+	{
+		address = $0
+		double_colon = index(address, "::")
+
+		if (double_colon) {
+			left_part = substr(address, 1, double_colon - 1)
+			right_part = substr(address, double_colon + 2)
+
+			if (index(right_part, "::"))
+				exit 1
+
+			left_count = count_part(left_part)
+			right_count = count_part(right_part)
+
+			if (left_count + right_count >= 8)
+				exit 1
+
+			emit_part(left_part)
+
+			for (i = left_count + right_count; i < 8; i++)
+				printf "0000"
+
+			emit_part(right_part)
+		} else {
+			count = count_part(address)
+
+			if (count != 8)
+				exit 1
+
+			emit_part(address)
+		}
+
+		printf "\n"
+	}
+	' <<EOF
+$ip_address
+EOF
 }
 
 
@@ -77,65 +186,61 @@ ipv4_to_hex()
 #   mybox.local
 # becomes:
 #   056d79626f78056c6f63616c00
-#
-# This deliberately avoids "set -- $name", because service instance names
-# may contain spaces, for example "mybox SSH".
 # ----------------------------------------------------------------------
 
 dns_name_hex()
 {
-    dns_name=$1
-    encoded_name=""
-    remaining=$dns_name
+	remaining=$1
+	encoded_name=""
 
-    while [ -n "$remaining" ]; do
-        case "$remaining" in
-            *.*)
-                label=${remaining%%.*}
-                remaining=${remaining#*.}
-                ;;
-            *)
-                label=$remaining
-                remaining=""
-                ;;
-        esac
+	while [ -n "$remaining" ]; do
+		case "$remaining" in
+			*.*)
+				label=${remaining%%.*}
+				remaining=${remaining#*.}
+				;;
+			*)
+				label=$remaining
+				remaining=""
+				;;
+		esac
 
-        [ -n "$label" ] || return 1
-        [ "${#label}" -le 63 ] || return 1
+		[ -n "$label" ] || return 1
+		[ "${#label}" -le 63 ] || return 1
 
-        label_length=$(printf '%02x' "${#label}") || return 1
-        label_hex=$(printf '%s' "$label" | od -An -tx1 | tr -d ' \n') || return 1
+		label_length=$(printf '%02x' "${#label}") || return 1
+		label_hex=$(printf '%s' "$label" |
+			od -An -tx1 | tr -d ' \n') || return 1
 
-        encoded_name="${encoded_name}${label_length}${label_hex}"
-    done
+		encoded_name=${encoded_name}${label_length}${label_hex}
+	done
 
-    printf '%s00' "$encoded_name"
+	printf '%s00' "$encoded_name"
 }
 
 
 # ----------------------------------------------------------------------
-# Convert hexadecimal bytes to printf %b escape text.
+# Convert hexadecimal packet data to printf %b escape text.
 #
 # Example:
 #   aabb -> \xaa\xbb
-#
-# The result is text, not binary, so it is safe to store in a shell
-# variable and later pass to printf '%b'.
 # ----------------------------------------------------------------------
 
 packet_from_hex()
 {
-    hex_packet=$1
-    payload=""
-    offset=1
+	hex_packet=$1
+	payload=""
+	offset=1
 
-    while [ "$offset" -le "${#hex_packet}" ]; do
-        byte=$(printf '%s' "$hex_packet" | cut -c "$offset-$((offset + 1))")
-        payload="${payload}\\x${byte}"
-        offset=$((offset + 2))
-    done
+	while [ "$offset" -le "${#hex_packet}" ]; do
+		byte=$(printf '%s' "$hex_packet" |
+			cut -c "$offset-$((offset + 1))")
 
-    printf '%s' "$payload"
+		payload=${payload}\\x${byte}
+		offset=$((offset + 2))
+	done
+
+	printf '%s' "$payload"
 }
 
 
@@ -145,47 +250,64 @@ packet_from_hex()
 
 make_a_record_payload()
 {
-    ip_address=$1
-    hex_ip=$(ipv4_to_hex "$ip_address") || return 1
-    name_hex=$(dns_name_hex "${HOSTNAME}.local") || return 1
+	ip_address=$1
 
-    # DNS header:
-    # ID=0, flags=0x8400, questions=0, answers=1,
-    # authority=0, additional=0.
-    dns_header="000084000000000100000000"
+	address_hex=$(ipv4_to_hex "$ip_address") || return 1
+	name_hex=$(dns_name_hex "${HOSTNAME}.local") || return 1
+	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
 
-    # A record:
-    # type=A, class=IN+cache-flush, TTL, length=4, IPv4 address.
-    dns_record="${name_hex}00018001$(printf '%08x' "$DNS_TTL")0004${hex_ip}"
+	dns_header="000084000000000100000000"
 
-    packet_from_hex "${dns_header}${dns_record}"
+	dns_record="${name_hex}00018001${ttl_hex}0004${address_hex}"
+
+	packet_from_hex "${dns_header}${dns_record}"
+}
+
+
+# ----------------------------------------------------------------------
+# Build an AAAA-record announcement.
+# ----------------------------------------------------------------------
+
+make_aaaa_record_payload()
+{
+	ip_address=$1
+
+	address_hex=$(ipv6_to_hex "$ip_address") || return 1
+	[ "${#address_hex}" -eq 32 ] || return 1
+
+	name_hex=$(dns_name_hex "${HOSTNAME}.local") || return 1
+	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
+
+	dns_header="000084000000000100000000"
+	dns_record="${name_hex}001c8001${ttl_hex}0010${address_hex}"
+
+	packet_from_hex "${dns_header}${dns_record}"
 }
 
 
 # ----------------------------------------------------------------------
 # Build a PTR-record announcement.
-#
-# Example:
-#   _ssh._tcp.local PTR mybox SSH._ssh._tcp.local
 # ----------------------------------------------------------------------
 
 make_ptr_record_payload()
 {
-    service_name=$1
-    instance_name=$2
+	service_name=$1
+	instance_name=$2
 
-    service_hex=$(dns_name_hex "${service_name}.local") || return 1
-    target_hex=$(dns_name_hex "${instance_name}.${service_name}.local") || return 1
+	service_hex=$(dns_name_hex "${service_name}.local") || return 1
+	target_hex=$(dns_name_hex \
+		"${instance_name}.${service_name}.local") || return 1
 
-    target_length=$(( ${#target_hex} / 2 ))
-    target_length_hex=$(printf '%04x' "$target_length") || return 1
+	target_length=$(( ${#target_hex} / 2 ))
+	target_length_hex=$(printf '%04x' "$target_length") || return 1
+	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
 
-    dns_header="000084000000000100000000"
+	dns_header="000084000000000100000000"
 
-    # PTR records are shared records, so use class IN without cache flush.
-    dns_record="${service_hex}000c0001$(printf '%08x' "$DNS_TTL")${target_length_hex}${target_hex}"
+	dns_record="${service_hex}000c0001${ttl_hex}"
+	dns_record=${dns_record}${target_length_hex}${target_hex}
 
-    packet_from_hex "${dns_header}${dns_record}"
+	packet_from_hex "${dns_header}${dns_record}"
 }
 
 
@@ -195,25 +317,27 @@ make_ptr_record_payload()
 
 make_srv_record_payload()
 {
-    instance_name=$1
-    service_name=$2
-    port=$3
-    target_host=$4
+	instance_name=$1
+	service_name=$2
+	port=$3
+	target_host=$4
 
-    name_hex=$(dns_name_hex "${instance_name}.${service_name}.local") || return 1
-    target_hex=$(dns_name_hex "${target_host}.local") || return 1
+	name_hex=$(dns_name_hex \
+		"${instance_name}.${service_name}.local") || return 1
+	target_hex=$(dns_name_hex "${target_host}.local") || return 1
 
-    port_hex=$(printf '%04x' "$port") || return 1
-    target_length=$(( ${#target_hex} / 2 ))
-    record_length=$((6 + target_length))
-    record_length_hex=$(printf '%04x' "$record_length") || return 1
+	port_hex=$(printf '%04x' "$port") || return 1
+	target_length=$(( ${#target_hex} / 2 ))
+	record_length=$((6 + target_length))
+	record_length_hex=$(printf '%04x' "$record_length") || return 1
+	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
 
-    dns_header="000084000000000100000000"
+	dns_header="000084000000000100000000"
 
-    # Priority=0, weight=0, port, target hostname.
-    dns_record="${name_hex}00210001$(printf '%08x' "$DNS_TTL")${record_length_hex}00000000${port_hex}${target_hex}"
+	dns_record="${name_hex}00210001${ttl_hex}${record_length_hex}"
+	dns_record=${dns_record}00000000${port_hex}${target_hex}
 
-    packet_from_hex "${dns_header}${dns_record}"
+	packet_from_hex "${dns_header}${dns_record}"
 }
 
 
@@ -223,120 +347,206 @@ make_srv_record_payload()
 
 make_txt_record_payload()
 {
-    instance_name=$1
-    service_name=$2
-    txt_value=$3
+	instance_name=$1
+	service_name=$2
+	txt_value=$3
 
-    name_hex=$(dns_name_hex "${instance_name}.${service_name}.local") || return 1
+	name_hex=$(dns_name_hex \
+		"${instance_name}.${service_name}.local") || return 1
 
-    if [ -n "$txt_value" ]; then
-        txt_bytes=$(printf '%s' "$txt_value" | od -An -tx1 | tr -d ' \n') || return 1
-        txt_length=$(printf '%02x' "${#txt_value}") || return 1
-        txt_hex="${txt_length}${txt_bytes}"
-    else
-        # One empty TXT string.
-        txt_hex="00"
-    fi
+	if [ -n "$txt_value" ]; then
+		txt_bytes=$(printf '%s' "$txt_value" |
+			od -An -tx1 | tr -d ' \n') || return 1
+		txt_length=$(printf '%02x' "${#txt_value}") || return 1
+		txt_hex=${txt_length}${txt_bytes}
+	else
+		txt_hex="00"
+	fi
 
-    record_length=$(( ${#txt_hex} / 2 ))
-    record_length_hex=$(printf '%04x' "$record_length") || return 1
+	record_length=$(( ${#txt_hex} / 2 ))
+	record_length_hex=$(printf '%04x' "$record_length") || return 1
+	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
 
-    dns_header="000084000000000100000000"
+	dns_header="000084000000000100000000"
 
-    # TXT records are unique records, so use the cache-flush bit.
-    dns_record="${name_hex}00108001$(printf '%08x' "$DNS_TTL")${record_length_hex}${txt_hex}"
+	dns_record="${name_hex}00108001${ttl_hex}"
+	dns_record=${dns_record}${record_length_hex}${txt_hex}
 
-    packet_from_hex "${dns_header}${dns_record}"
+	packet_from_hex "${dns_header}${dns_record}"
 }
 
 
 # ----------------------------------------------------------------------
-# Send one escaped packet through BusyBox nc.
+# Send an escaped packet through nc.
 # ----------------------------------------------------------------------
 
 send_payload()
 {
-    payload=$1
-    ip_address=$2
+	payload=$1
+	source_address=$2
+	destination_address=$3
 
-    if [ "$USE_SOURCE_ADDRESS" -eq 1 ]; then
-        printf '%b' "$payload" |
-            nc -u -p "$MDNS_PORT" -s "$ip_address" -w 1 \
-                "$MDNS_GROUP" "$MDNS_PORT" >/dev/null 2>&1
-    else
-        printf '%b' "$payload" |
-            nc -u -p "$MDNS_PORT" -w 1 \
-                "$MDNS_GROUP" "$MDNS_PORT" >/dev/null 2>&1
-    fi
+	if [ "$USE_SOURCE_ADDRESS" -eq 1 ]; then
+		printf '%b' "$payload" |
+			nc -u -p "$MDNS_PORT" \
+				-s "$source_address" \
+				-w 1 \
+				"$destination_address" "$MDNS_PORT" \
+				>/dev/null 2>&1
+	else
+		printf '%b' "$payload" |
+			nc -u -p "$MDNS_PORT" \
+				-w 1 \
+				"$destination_address" "$MDNS_PORT" \
+				>/dev/null 2>&1
+	fi
 }
 
 
 # ----------------------------------------------------------------------
-# Announce one address.
+# Announce one IPv4 or IPv6 address.
 # ----------------------------------------------------------------------
 
 announce_address()
 {
-    iface=$1
-    ip_address=$2
+	family=$1
+	iface=$2
+	ip_address=$3
 
-   _logger "Announcing ${HOSTNAME}.local -> ${ip_address} via ${iface}"
+	case "$family" in
+		4)
+			source_address=$ip_address
+			destination_address=$MDNS_GROUP4
+			payload=$(make_a_record_payload "$ip_address") || return 1
+			;;
 
-    payload=$(make_a_record_payload "$ip_address") || return 1
-    send_payload "$payload" "$ip_address"
+		6)
+			source_address=$ip_address
+			destination_address=${MDNS_GROUP6}%${iface}
 
-    if [ "$ADVERTISE_SSH" -eq 1 ]; then
-        ssh_instance="${HOSTNAME} SSH"
+			case "$ip_address" in
+				fe80:*)
+					source_address=${ip_address}%${iface}
+					;;
+			esac
 
-        payload=$(make_ptr_record_payload "_ssh._tcp" "$ssh_instance") || return 1
-        send_payload "$payload" "$ip_address"
+			payload=$(make_aaaa_record_payload "$ip_address") || return 1
+			;;
 
-        payload=$(make_srv_record_payload \
-            "$ssh_instance" "_ssh._tcp" "$SSH_PORT" "$HOSTNAME") || return 1
-        send_payload "$payload" "$ip_address"
+		*)
+			return 1
+			;;
+	esac
 
-        payload=$(make_txt_record_payload \
-            "$ssh_instance" "_ssh._tcp" "") || return 1
-        send_payload "$payload" "$ip_address"
-    fi
+	_logger "Announcing ${HOSTNAME}.local -> ${ip_address} via ${iface} (IPv${family})"
 
-    if [ "$ADVERTISE_HTTP" -eq 1 ]; then
-        http_instance="${HOSTNAME} Web"
+	send_payload "$payload" "$source_address" \
+		"$destination_address" || return 1
 
-        payload=$(make_ptr_record_payload "_http._tcp" "$http_instance") || return 1
-        send_payload "$payload" "$ip_address"
+	if [ "$ADVERTISE_SSH" -eq 1 ]; then
+		instance="${HOSTNAME} SSH"
 
-        payload=$(make_srv_record_payload \
-            "$http_instance" "_http._tcp" "$HTTP_PORT" "$HOSTNAME") || return 1
-        send_payload "$payload" "$ip_address"
+		payload=$(make_ptr_record_payload \
+			"_ssh._tcp" "$instance") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" || return 1
 
-        payload=$(make_txt_record_payload \
-            "$http_instance" "_http._tcp" "path=${HTTP_PATH}") || return 1
-        send_payload "$payload" "$ip_address"
-    fi
+		payload=$(make_srv_record_payload \
+			"$instance" "_ssh._tcp" "$SSH_PORT" "$HOSTNAME") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" || return 1
+
+		payload=$(make_txt_record_payload \
+			"$instance" "_ssh._tcp" "") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" || return 1
+	fi
+
+	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
+		instance="${HOSTNAME} Web"
+
+		payload=$(make_ptr_record_payload \
+			"_http._tcp" "$instance") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" || return 1
+
+		payload=$(make_srv_record_payload \
+			"$instance" "_http._tcp" "$HTTP_PORT" "$HOSTNAME") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" || return 1
+
+		payload=$(make_txt_record_payload \
+			"$instance" "_http._tcp" "path=${HTTP_PATH}") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" || return 1
+	fi
 }
 
 
 # ----------------------------------------------------------------------
-# Enumerate all active IPv4 addresses.
+# Enumerate active IPv4 addresses.
+# ----------------------------------------------------------------------
+
+send_ipv4_announcements()
+{
+	ip -o -4 addr show up 2>/dev/null |
+		while read -r _ iface _ address _; do
+			ip_address=${address%/*}
+
+			case "$ip_address" in
+				127.*|0.*|169.254.*)
+					continue
+					;;
+			esac
+
+			announce_address 4 "$iface" "$ip_address" || {
+				error "Failed to announce IPv4 $ip_address on $iface"
+			}
+		done
+}
+
+
+# ----------------------------------------------------------------------
+# Enumerate active IPv6 addresses.
+# ----------------------------------------------------------------------
+
+send_ipv6_announcements()
+{
+	[ "$ADVERTISE_IPV6" -eq 1 ] || return 0
+
+	ip -o -6 addr show up 2>/dev/null |
+		while read -r _ iface _ address _ scope _; do
+			ip_address=${address%/*}
+
+			case "$ip_address" in
+				::|::1|ff*|0:*)
+					continue
+					;;
+			esac
+
+			case "$scope" in
+				global|link)
+					;;
+				*)
+					continue
+					;;
+			esac
+
+			announce_address 6 "$iface" "$ip_address" || {
+				error "Failed to announce IPv6 $ip_address on $iface"
+			}
+		done
+}
+
+
+# ----------------------------------------------------------------------
+# Enumerate and announce all configured addresses.
 # ----------------------------------------------------------------------
 
 send_all_announcements()
 {
-    ip -o -4 addr show up 2>/dev/null |
-        while read -r _ iface _ address _; do
-            ip_address=${address%/*}
-
-            case "$ip_address" in
-                127.*|0.*)
-                    continue
-                    ;;
-            esac
-
-            announce_address "$iface" "$ip_address" || {
-                error "Failed to announce $ip_address on $iface"
-            }
-        done
+	send_ipv4_announcements
+	send_ipv6_announcements
 }
 
 
@@ -344,74 +554,130 @@ send_all_announcements()
 # Usage.
 # ----------------------------------------------------------------------
 
-usage() {
-[ "$2" ] && error "$2"
-local outfh=2
-[ "$1" -eq 0 ] && outfh=1
+usage()
+{
+	if [ "$2" ]; then
+		error "$2"
+	fi
 
-cat >&$outfh <<-__EOF__
+	if [ "$1" -eq 0 ]; then
+		output_fd=1
+	else
+		output_fd=2
+	fi
 
-usage: tiny-mdns-ann [--host <host-name>] [--http[=port]] [--ssh[=port]]
+	cat >&"$output_fd" <<EOF
 
-Simply annonces hostname.local IP address over mdns/avahi on LAN,
-and optionally advertizes http (port 80) and/or ssh (port 22) services.
-Only requires netcat from Busybox or standalone nc utility.
-Lowest footprint & best-effort unsolicited announcer (not a mdns responder).
+usage: $SCRIPT [OPTIONS]
 
-Options: --help              Help information and usage
-         --host <host-name>  Specify host name to be announced in .local domain
-         --http[=port]       Announce http service (port 80 by default)
-         --ssh[=port]        Announce ssh service (port 22 by default)
+Announce HOSTNAME.local over mDNS on active interfaces.
 
-__EOF__
-exit "$1"
+Options:
+  --help              Show this help.
+  --host NAME         Host name to announce in the .local domain.
+  --http[=PORT]       Advertise HTTP, default port 80.
+  --ssh[=PORT]        Advertise SSH, default port 22.
+
+Environment:
+  ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
+  INTERVAL            Announcement interval, default 60.
+  USE_SOURCE_ADDRESS  Use nc -s, default 1.
+
+Notes:
+  IPv6 link-local multicast requires interface scoping; this is handled
+  automatically by the announcer.
+  BusyBox nc may not expose multicast TTL/hop-limit controls, so
+  announcements may not use the mDNS-required value of 255.
+
+EOF
+
+	exit "$1"
 }
 
+
 # ----------------------------------------------------------------------
-# Main
+# Main.
 # ----------------------------------------------------------------------
 
-! which nc > /dev/null && \
-	usage 1 "This tool requires netcat utility from Busybox or standalone; exiting."
+command -v nc >/dev/null 2>&1 ||
+	usage 1 "This tool requires netcat."
 
-OPTS=$(getopt -o "" -l help,host:,http::,ssh:: -n "$SCRIPT" -- "$@") || usage 1
+command -v ip >/dev/null 2>&1 ||
+	usage 1 "This tool requires ip."
+
+command -v getopt >/dev/null 2>&1 ||
+	usage 1 "This tool requires getopt."
+
+OPTS=$(getopt -o "" \
+	-l help,host:,http::,ssh:: \
+	-n "$SCRIPT" -- "$@") || usage 1
+
+# getopt output is shell syntax by design.
+# shellcheck disable=SC2086
 eval set -- "$OPTS"
-while true; do
+
+while [ "$1" != "--" ]; do
 	case "$1" in
-		--help) echo "$SCRIPT $VERSION"; usage 0;;
-		--host) shift; HOSTNAME="$1";;
-		--http) ADVERTISE_HTTP=1; [ -n "$2" ] && HTTP_PORT="$2" && shift;;
-		--ssh) ADVERTISE_SSH=1; [ -n "$2" ] && SSH_PORT="$2" && shift;;
-		--) break;;
+		--help)
+			echo "$SCRIPT $VERSION"
+			usage 0
+			;;
+
+		--host)
+			shift
+			HOSTNAME=$1
+			;;
+
+		--http)
+			ADVERTISE_HTTP=1
+			if [ -n "$2" ]; then
+				HTTP_PORT=$2
+				shift
+			fi
+			;;
+
+		--ssh)
+			ADVERTISE_SSH=1
+			if [ -n "$2" ]; then
+				SSH_PORT=$2
+				shift
+			fi
+			;;
 	esac
+
 	shift
 done
 
-# Parameters Validation
+
+# ----------------------------------------------------------------------
+# Parameter validation.
+# ----------------------------------------------------------------------
+
 case "$HOSTNAME" in
-    ""|*[!A-Za-z0-9-]*)
-        usage 1 "Invalid HOSTNAME: use only letters, digits, and '-'"
-        ;;
+	""|*[!A-Za-z0-9-]*)
+		usage 1 "Invalid HOSTNAME: use only letters, digits, and '-'."
+		;;
 esac
 
 if [ "${#HOSTNAME}" -gt 63 ]; then
-    usage 1 "HOSTNAME is longer than 63 characters"
+	usage 1 "HOSTNAME is longer than 63 characters."
 fi
 
 case "$INTERVAL:$MDNS_PORT:$DNS_TTL:$SSH_PORT:$HTTP_PORT" in
-    *[!0-9:]*)
-        usage 1 "INTERVAL, ports, and DNS_TTL must be numeric"
-        ;;
+	*[!0-9:]*)
+		usage 1 "INTERVAL, ports, and DNS_TTL must be numeric."
+		;;
 esac
 
-case "$ADVERTISE_SSH:$ADVERTISE_HTTP:$USE_SOURCE_ADDRESS" in
-    *[!01:]*)
-        usage 1 "ADVERTISE_SSH, ADVERTISE_HTTP, and USE_SOURCE_ADDRESS must be 0 or 1"
-        ;;
+case "$ADVERTISE_IPV6:$ADVERTISE_SSH:$ADVERTISE_HTTP:$USE_SOURCE_ADDRESS" in
+	*[!01:]*)
+		usage 1 "Feature flags must be 0 or 1."
+		;;
 esac
 
 
-_logger "Starting mDNS announcer for ${HOSTNAME}.local"
+_logger "Starting mDNS announcer v$VERSION by macmpi for ${HOSTNAME}.local"
+_logger "IPv6 announcements: ${ADVERTISE_IPV6}"
 
 # Initial announcement burst.
 send_all_announcements
@@ -422,7 +688,6 @@ send_all_announcements
 
 # Periodic announcements.
 while :; do
-    sleep "$INTERVAL"
-    send_all_announcements
+	sleep "$INTERVAL"
+	send_all_announcements
 done
-
