@@ -1,0 +1,26 @@
+#!/sbin/openrc-run
+
+# SPDX-FileCopyrightText: Copyright 2026, macmpi
+# SPDX-License-Identifier: MIT
+
+name="Tiny mDNS announcer"
+description="Announcement-only mDNS hostname and service announcer"
+
+command="/usr/bin/tiny-mdns-ann"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+
+depend() {
+	use logger
+	need net
+	after firewall
+}
+
+start_pre()
+{
+	export HOSTNAME
+	export ADVERTISE_HTTP HTTP_PORT HTTP_PATH
+	export ADVERTISE_SSH SSH_PORT
+	export INTERVAL ADVERTISE_IPV6 USE_SOURCE_ADDRESS DEBUG_LOG
+}
+
