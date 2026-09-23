@@ -5,7 +5,8 @@
 Hostname can then be resolved by any machine supporting mDNS/Avahi LAN discovery.
 
 `tiny-mdns-ann` only depends on `netcat`, as found in `busybox`, or other standalone implementations.\
-It merely sends unsolicited UDP announcement packets, and does not answer queries as a full mDNS responder would.
+It merely sends unsolicited UDP announcement packets, and does not answer queries.\
+It is a best-effort lightweight announcer, and is not intended as a replacement for fully compliant mDNS responder.
 
 ## Features:
 - hostname LAN IP address resolution
@@ -16,7 +17,7 @@ It merely sends unsolicited UDP announcement packets, and does not answer querie
 ## Benefits:
 - extremely small footprint
 - runs under POSIX shell
-- compatible with busybox's bundled `netcat`
+- compatible with busybox's `nc`
 
 ## Setup procedure:
 Make script executable and run `tiny-mdns-ann` on device as follows:
@@ -32,21 +33,19 @@ Options:
   --ssh[=PORT]        Advertise SSH, default port 22.
 
 Environment:
+  INTERVAL            Announcement interval in seconds, default 60.
   ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
-  INTERVAL            Announcement interval, default 60.
   USE_SOURCE_ADDRESS  Use nc -s, default 1.
-  DEBUG_LOG	          Log each announcement, default 0.
-
-Notes:
-  IPv6 link-local multicast requires interface scoping; this is handled
-  automatically by the announcer.
-  BusyBox nc may not expose multicast TTL/hop-limit controls, so
-  announcements may not use the mDNS-required value of 255.
+  DEBUG_LOG           Log each announcement, default 0.
 ```
 Main execution steps are logged: `grep tiny-mdns-ann /var/log/messages`.
 
 OpenRC and Systemd services files are provided to run `tiny-mdns-ann` as a boot service.\
 A complete Alpine Linux [package](https://pkgs.alpinelinux.org/packages?name=tiny-mdns-announcer&branch=edge&repo=&arch=&origin=&flagged=&maintainer=) is also in the works.
+
+## Notes:
+- IPv6 link-local multicast requires interface scoping; this is handled automatically by the announcer.
+- As `nc` does not allow multicast `ttl`/`hop-limit` controls, announcements do not set mDNS-required value of 255, but still work in most cases.
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/tiny-mdns-announcer.svg)](https://repology.org/project/tiny-mdns-announcer/versions)
 

@@ -597,12 +597,6 @@ Environment:
   USE_SOURCE_ADDRESS  Use nc -s, default 1.
   DEBUG_LOG	          Log each announcement, default 0.
 
-Notes:
-  IPv6 link-local multicast requires interface scoping; this is handled
-  automatically by the announcer.
-  BusyBox nc may not expose multicast TTL/hop-limit controls, so
-  announcements may not use the mDNS-required value of 255.
-
 EOF
 
 	exit "$1"
