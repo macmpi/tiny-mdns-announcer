@@ -404,6 +404,23 @@ send_payload()
 
 
 # ----------------------------------------------------------------------
+# Find the interface link-local IPv6 address.
+# ----------------------------------------------------------------------
+
+ipv6_link_local()
+{
+	iface=$1
+
+	ip -o -6 addr show dev "$iface" scope link 2>/dev/null |
+		awk '$4 ~ /^fe80:/ {
+			sub(/\/.*/, "", $4)
+			print $4 "%" iface
+			exit
+		}' iface="$iface"
+}
+
+
+# ----------------------------------------------------------------------
 # Announce one IPv4 or IPv6 address.
 # ----------------------------------------------------------------------
 
@@ -421,15 +438,9 @@ announce_address()
 			;;
 
 		6)
-			source_address=$ip_address
+			source_address=$(ipv6_link_local "$iface")
+			[ -n "$source_address" ] || return 1
 			destination_address=${MDNS_GROUP6}%${iface}
-
-			case "$ip_address" in
-				fe80:*)
-					source_address=${ip_address}%${iface}
-					;;
-			esac
-
 			payload=$(make_aaaa_record_payload "$ip_address") || return 1
 			;;
 
