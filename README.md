@@ -16,7 +16,7 @@ It is a best-effort lightweight announcer, and is not intended as a replacement 
 
 ## Benefits:
 - extremely small footprint
-- runs under POSIX shell
+- runs under POSIX shell on Linux, *BSD, macOS, Windows
 - compatible with busybox's `nc`
 
 ## Setup procedure:
@@ -43,11 +43,12 @@ Main execution steps are logged: `grep tiny-mdns-ann /var/log/messages`.
 OpenRC and Systemd services files are provided to run `tiny-mdns-ann` as a boot service.\
 A complete Alpine Linux [package](https://pkgs.alpinelinux.org/packages?name=tiny-mdns-announcer&branch=edge&repo=&arch=&origin=&flagged=&maintainer=) is also in the works.
 
-## Notes:
+[![Packaging status](https://repology.org/badge/vertical-allrepos/tiny-mdns-announcer.svg)](https://repology.org/project/tiny-mdns-announcer/versions)
+
+*Note:*
 - IPv6 link-local multicast requires interface scoping; this is handled automatically by the announcer.
 - As `nc` does not allow multicast `ttl`/`hop-limit` controls, announcements do not set mDNS-required value of 255, but still work in most cases.
-
-[![Packaging status](https://repology.org/badge/vertical-allrepos/tiny-mdns-announcer.svg)](https://repology.org/project/tiny-mdns-announcer/versions)
+- If `socat` is available, it is used in place of `nc` to send announcements with `ttl`/`hop-limit` 255.
 
 ##
 <a href='https://ko-fi.com/V7V81B2UF6' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi5.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
