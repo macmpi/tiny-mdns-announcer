@@ -490,7 +490,7 @@ announce_address()
 		"$destination_address" "$family" || return 1
 
 	if [ "$ADVERTISE_SSH" -eq 1 ]; then
-		instance="${HOSTNAME} SSH"
+		instance="${HOSTNAME}"
 
 		payload=$(make_ptr_record_payload \
 			"_ssh._tcp" "$instance") || return 1
@@ -509,7 +509,7 @@ announce_address()
 	fi
 
 	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
-		instance="${HOSTNAME} Web"
+		instance="${HOSTNAME}"
 
 		payload=$(make_ptr_record_payload \
 			"_http._tcp" "$instance") || return 1
