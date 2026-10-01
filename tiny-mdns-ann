@@ -32,7 +32,7 @@
 # If socat is available, it will be used instead of nc to send
 # announcements with TTL/hop limit of 255.
 
-VERSION="0.4"
+VERSION="0.5"
 
 SCRIPT="${0##*/}"
 
