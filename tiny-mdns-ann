@@ -25,9 +25,12 @@
 #   nc -u -p 5353 -s 'fe80::1%wlan0' -w 1 \
 #      'ff02::fb%wlan0' 5353
 #
-# BusyBox nc does not expose IP_MULTICAST_TTL or IPV6_MULTICAST_HOPS.
+# Limitation: nc does not expose IP_MULTICAST_TTL or IPV6_MULTICAST_HOPS.
 # Consequently, IPv4 and IPv6 packets may not use the mDNS-required
-# TTL/hop limit of 255.
+# TTL/hop limit of 255, which is ok in most cases.
+
+# If socat is available, it will be used instead of nc to send
+# announcements with TTL/hop limit of 255.
 
 VERSION="0.4"
 
@@ -377,7 +380,7 @@ make_txt_record_payload()
 
 
 # ----------------------------------------------------------------------
-# Send an escaped packet through nc.
+# Send an escaped packet through nc, or socat if available
 # ----------------------------------------------------------------------
 
 send_payload()
@@ -385,6 +388,36 @@ send_payload()
 	payload=$1
 	source_address=$2
 	destination_address=$3
+	family=$4
+
+	if [ "$SEND_TOOL" = socat ]; then
+		case "$family" in
+			4)
+				if [ "$USE_SOURCE_ADDRESS" -eq 1 ]; then
+					socat_address="UDP4-DATAGRAM:${destination_address}:${MDNS_PORT},bind=${source_address}:${MDNS_PORT},multicastttl=255"
+				else
+					socat_address="UDP4-DATAGRAM:${destination_address}:${MDNS_PORT},bind=0.0.0.0:${MDNS_PORT},multicastttl=255"
+				fi
+				;;
+
+			6)
+				if [ "$USE_SOURCE_ADDRESS" -eq 1 ]; then
+					socat_address="UDP6-DATAGRAM:[${destination_address}]:${MDNS_PORT},bind=[${source_address}]:${MDNS_PORT},${SOCAT_IPV6_HOPS}"
+				else
+					socat_address="UDP6-DATAGRAM:[${destination_address}]:${MDNS_PORT},bind=[::]:${MDNS_PORT},${SOCAT_IPV6_HOPS}"
+				fi
+				;;
+
+			*)
+				return 1
+				;;
+		esac
+
+		printf '%b' "$payload" |
+			socat -u -T1 - "$socat_address" \
+				>/dev/null 2>&1
+		return $?
+	fi
 
 	if [ "$USE_SOURCE_ADDRESS" -eq 1 ]; then
 		printf '%b' "$payload" |
@@ -454,7 +487,7 @@ announce_address()
 	fi
 
 	send_payload "$payload" "$source_address" \
-		"$destination_address" || return 1
+		"$destination_address" "$family" || return 1
 
 	if [ "$ADVERTISE_SSH" -eq 1 ]; then
 		instance="${HOSTNAME} SSH"
@@ -462,17 +495,17 @@ announce_address()
 		payload=$(make_ptr_record_payload \
 			"_ssh._tcp" "$instance") || return 1
 		send_payload "$payload" "$source_address" \
-			"$destination_address" || return 1
+			"$destination_address" "$family" || return 1
 
 		payload=$(make_srv_record_payload \
 			"$instance" "_ssh._tcp" "$SSH_PORT" "$HOSTNAME") || return 1
 		send_payload "$payload" "$source_address" \
-			"$destination_address" || return 1
+			"$destination_address" "$family" || return 1
 
 		payload=$(make_txt_record_payload \
 			"$instance" "_ssh._tcp" "") || return 1
 		send_payload "$payload" "$source_address" \
-			"$destination_address" || return 1
+			"$destination_address" "$family" || return 1
 	fi
 
 	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
@@ -481,17 +514,17 @@ announce_address()
 		payload=$(make_ptr_record_payload \
 			"_http._tcp" "$instance") || return 1
 		send_payload "$payload" "$source_address" \
-			"$destination_address" || return 1
+			"$destination_address" "$family" || return 1
 
 		payload=$(make_srv_record_payload \
 			"$instance" "_http._tcp" "$HTTP_PORT" "$HOSTNAME") || return 1
 		send_payload "$payload" "$source_address" \
-			"$destination_address" || return 1
+			"$destination_address" "$family" || return 1
 
 		payload=$(make_txt_record_payload \
 			"$instance" "_http._tcp" "path=${HTTP_PATH}") || return 1
 		send_payload "$payload" "$source_address" \
-			"$destination_address" || return 1
+			"$destination_address" "$family" || return 1
 	fi
 }
 
@@ -607,8 +640,19 @@ EOF
 # Main.
 # ----------------------------------------------------------------------
 
-command -v nc >/dev/null 2>&1 ||
-	usage 1 "This tool requires netcat."
+if command -v socat >/dev/null 2>&1; then
+	SEND_TOOL=socat
+	# SOCAT_IPV6_HOPS parameter is os dependant
+	case "$(uname -s)" in
+		Linux) OPT=18 ;;
+    	*) OPT=10 ;; # default value for Darwin,*BSD,CYGWIN*,MSYS*
+	esac
+	SOCAT_IPV6_HOPS="setsockopt=41:$OPT:255"
+elif command -v nc >/dev/null 2>&1; then
+	SEND_TOOL=nc
+else
+	usage 1 "This tool requires netcat, or optionally socat."
+fi
 
 command -v ip >/dev/null 2>&1 ||
 	usage 1 "This tool requires ip."
@@ -687,6 +731,7 @@ esac
 _logger "Starting Tiny mDNS announcer v$VERSION by macmpi for ${HOSTNAME}.local"
 if [ "$DEBUG_LOG" -eq 1 ]; then
 	_logger "IPv6 announcements: ${ADVERTISE_IPV6}"
+	_logger "UDP sender: ${SEND_TOOL}"
 fi
 # Initial announcement burst.
 send_all_announcements
