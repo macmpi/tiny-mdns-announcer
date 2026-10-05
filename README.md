@@ -35,7 +35,7 @@ Options:
 Environment:
   INTERVAL            Announcement interval in seconds, default 60.
   ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
-  USE_SOURCE_ADDRESS  Use nc -s, default 1.
+  USE_SOURCE_ADDRESS  Use nc -s or socat bind, default 1.
   DEBUG_LOG           Log each announcement, default 0.
 ```
 Main execution steps are logged: `grep tiny-mdns-ann /var/log/messages`.
@@ -48,7 +48,7 @@ A complete Alpine Linux [package](https://pkgs.alpinelinux.org/packages?name=tin
 *Note & limitations:*
 - As `nc` does not allow multicast `ttl`/`hop-limit` controls, announcements do not set mDNS-required value of 255, but work just fine in most cases.
 - If `socat` is available, it is used in place of `nc` to send announcements with `ttl`/`hop-limit` 255.
-- Service discovery works reliably when other devices on the LAN have already announced that service type. For first-time service discovery on a virgin LAN, use a full mDNS responder like Avahi.
+- Service discovery works reliably when other devices on the LAN have already announced that service type. If first-time service discovery on a virgin LAN is critical, use a full mDNS responder like Avahi.
 
 ##
 <a href='https://ko-fi.com/V7V81B2UF6' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi5.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
