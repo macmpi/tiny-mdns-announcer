@@ -19,12 +19,6 @@
 #
 # This sends unsolicited announcements only. It does not answer queries.
 #
-# IPv6 requires an nc implementation that accepts scoped IPv6 addresses,
-# for example:
-#
-#   nc -u -p 5353 -s 'fe80::1%wlan0' -w 1 \
-#      'ff02::fb%wlan0' 5353
-#
 # Limitation: nc does not expose IP_MULTICAST_TTL or IPV6_MULTICAST_HOPS.
 # Consequently, IPv4 and IPv6 packets may not use the mDNS-required
 # TTL/hop limit of 255, which is ok in most cases.
@@ -315,48 +309,43 @@ make_ptr_record_payload()
 
 
 # ----------------------------------------------------------------------
-# Build an SRV-record announcement.
+# Build a combined service announcement with PTR, SRV, and TXT in one packet.
+# This is a best-effort improvement for mDNS/DNS-SD clients that handle
+# grouped records more reliably than separate packets.
 # ----------------------------------------------------------------------
 
-make_srv_record_payload()
+make_service_announcement()
 {
 	instance_name=$1
 	service_name=$2
 	port=$3
 	target_host=$4
+	txt_value=$5
 
+	# Build PTR record
+	service_hex=$(dns_name_hex "${service_name}.local") || return 1
+	target_hex=$(dns_name_hex \
+		"${instance_name}.${service_name}.local") || return 1
+	target_length=$(( ${#target_hex} / 2 ))
+	target_length_hex=$(printf '%04x' "$target_length") || return 1
+	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
+
+	ptr_record="${service_hex}000c0001${ttl_hex}"
+	ptr_record=${ptr_record}${target_length_hex}${target_hex}
+
+	# Build SRV record
 	name_hex=$(dns_name_hex \
 		"${instance_name}.${service_name}.local") || return 1
 	target_hex=$(dns_name_hex "${target_host}.local") || return 1
-
 	port_hex=$(printf '%04x' "$port") || return 1
 	target_length=$(( ${#target_hex} / 2 ))
 	record_length=$((6 + target_length))
 	record_length_hex=$(printf '%04x' "$record_length") || return 1
-	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
 
-	dns_header="000084000000000100000000"
+	srv_record="${name_hex}00210001${ttl_hex}${record_length_hex}"
+	srv_record=${srv_record}00000000${port_hex}${target_hex}
 
-	dns_record="${name_hex}00210001${ttl_hex}${record_length_hex}"
-	dns_record=${dns_record}00000000${port_hex}${target_hex}
-
-	packet_from_hex "${dns_header}${dns_record}"
-}
-
-
-# ----------------------------------------------------------------------
-# Build a TXT-record announcement.
-# ----------------------------------------------------------------------
-
-make_txt_record_payload()
-{
-	instance_name=$1
-	service_name=$2
-	txt_value=$3
-
-	name_hex=$(dns_name_hex \
-		"${instance_name}.${service_name}.local") || return 1
-
+	# Build TXT record
 	if [ -n "$txt_value" ]; then
 		txt_bytes=$(printf '%s' "$txt_value" |
 			od -An -tx1 | tr -d ' \n') || return 1
@@ -366,21 +355,74 @@ make_txt_record_payload()
 		txt_hex="00"
 	fi
 
-	record_length=$(( ${#txt_hex} / 2 ))
-	record_length_hex=$(printf '%04x' "$record_length") || return 1
-	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
+	txt_record_length=$(( ${#txt_hex} / 2 ))
+	txt_record_length_hex=$(printf '%04x' "$txt_record_length") || return 1
 
-	dns_header="000084000000000100000000"
+	txt_record="${name_hex}00108001${ttl_hex}"
+	txt_record=${txt_record}${txt_record_length_hex}${txt_hex}
 
-	dns_record="${name_hex}00108001${ttl_hex}"
-	dns_record=${dns_record}${record_length_hex}${txt_hex}
+	# Three answer records in one packet.
+	dns_header="000084000000000300000000"
+	dns_packet="${dns_header}${ptr_record}${srv_record}${txt_record}"
 
-	packet_from_hex "${dns_header}${dns_record}"
+	packet_from_hex "$dns_packet"
 }
 
 
 # ----------------------------------------------------------------------
-# Send an escaped packet through nc, or socat if available
+# Announce mDNS service type availability via _services._dns-sd._udp.
+# Browsers may populate service categories once they see type records.
+# ----------------------------------------------------------------------
+
+announce_service_types()
+{
+	source_address=$1
+	destination_address=$2
+	family=$3
+
+	if [ "$ADVERTISE_SSH" -eq 1 ]; then
+		payload=$(make_ptr_record_payload \
+			"_services._dns-sd._udp" "_ssh._tcp") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" "$family" || return 1
+	fi
+
+	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
+		payload=$(make_ptr_record_payload \
+			"_services._dns-sd._udp" "_http._tcp") || return 1
+		send_payload "$payload" "$source_address" \
+			"$destination_address" "$family" || return 1
+	fi
+}
+
+
+# ----------------------------------------------------------------------
+# Send a one-shot mDNS query for a service type to "wake up" service
+# browsing on a virgin LAN. This is a best-effort compatibility aid.
+# ----------------------------------------------------------------------
+
+query_service_type()
+{
+	service_name=$1
+	source_address=$2
+	destination_address=$3
+	family=$4
+
+	service_hex=$(dns_name_hex "${service_name}.local") || return 1
+
+	# Header: one question, no flags, no answer
+	dns_header="000000000001000000000000"
+	dns_question="${service_hex}000c0001"
+
+	payload=$(packet_from_hex "${dns_header}${dns_question}")
+
+	send_payload "$payload" "$source_address" \
+		"$destination_address" "$family"
+}
+
+
+# ----------------------------------------------------------------------
+# Send an escaped packet through nc, or socat if available.
 # ----------------------------------------------------------------------
 
 send_payload()
@@ -394,27 +436,25 @@ send_payload()
 		case "$family" in
 			4)
 				if [ "$USE_SOURCE_ADDRESS" -eq 1 ]; then
-					socat_address="UDP4-DATAGRAM:${destination_address}:${MDNS_PORT},bind=${source_address}:${MDNS_PORT},multicastttl=255"
+					socat_target="UDP4-DATAGRAM:${destination_address}:${MDNS_PORT},bind=${source_address}:${MDNS_PORT},multicastttl=255"
 				else
-					socat_address="UDP4-DATAGRAM:${destination_address}:${MDNS_PORT},bind=0.0.0.0:${MDNS_PORT},multicastttl=255"
+					socat_target="UDP4-DATAGRAM:${destination_address}:${MDNS_PORT},bind=0.0.0.0:${MDNS_PORT},multicastttl=255"
 				fi
 				;;
-
 			6)
 				if [ "$USE_SOURCE_ADDRESS" -eq 1 ]; then
-					socat_address="UDP6-DATAGRAM:[${destination_address}]:${MDNS_PORT},bind=[${source_address}]:${MDNS_PORT},${SOCAT_IPV6_HOPS}"
+					socat_target="UDP6-DATAGRAM:[${destination_address}]:${MDNS_PORT},bind=[${source_address}]:${MDNS_PORT},${SOCAT_IPV6_HOPS}"
 				else
-					socat_address="UDP6-DATAGRAM:[${destination_address}]:${MDNS_PORT},bind=[::]:${MDNS_PORT},${SOCAT_IPV6_HOPS}"
+					socat_target="UDP6-DATAGRAM:[${destination_address}]:${MDNS_PORT},bind=[::]:${MDNS_PORT},${SOCAT_IPV6_HOPS}"
 				fi
 				;;
-
 			*)
 				return 1
 				;;
 		esac
 
 		printf '%b' "$payload" |
-			socat -u -T1 - "$socat_address" \
+			socat -u -T1 - "$socat_target" \
 				>/dev/null 2>&1
 		return $?
 	fi
@@ -437,23 +477,6 @@ send_payload()
 
 
 # ----------------------------------------------------------------------
-# Find the interface link-local IPv6 address.
-# ----------------------------------------------------------------------
-
-ipv6_link_local()
-{
-	iface=$1
-
-	ip -o -6 addr show dev "$iface" scope link 2>/dev/null |
-		awk '$4 ~ /^fe80:/ {
-			sub(/\/.*/, "", $4)
-			print $4 "%" iface
-			exit
-		}' iface="$iface"
-}
-
-
-# ----------------------------------------------------------------------
 # Announce one IPv4 or IPv6 address.
 # ----------------------------------------------------------------------
 
@@ -469,14 +492,18 @@ announce_address()
 			destination_address=$MDNS_GROUP4
 			payload=$(make_a_record_payload "$ip_address") || return 1
 			;;
-
 		6)
-			source_address=$(ipv6_link_local "$iface")
-			[ -n "$source_address" ] || return 1
+			source_address=$ip_address
 			destination_address=${MDNS_GROUP6}%${iface}
+
+			case "$ip_address" in
+				fe80:*)
+					source_address=${ip_address}%${iface}
+					;;
+			esac
+
 			payload=$(make_aaaa_record_payload "$ip_address") || return 1
 			;;
-
 		*)
 			return 1
 			;;
@@ -486,24 +513,29 @@ announce_address()
 		_logger "Announcing ${HOSTNAME}.local -> ${ip_address} via ${iface} (IPv${family})"
 	fi
 
+	# Hostname announcement.
 	send_payload "$payload" "$source_address" \
 		"$destination_address" "$family" || return 1
+
+	# Service-type enumeration records.
+	announce_service_types "$source_address" \
+		"$destination_address" "$family" || return 1
+
+	# A few self-queries to encourage service browsing on a virgin LAN.
+	if [ "$ADVERTISE_SSH" -eq 1 ]; then
+		query_service_type "_ssh._tcp" "$source_address" \
+			"$destination_address" "$family"
+	fi
+	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
+		query_service_type "_http._tcp" "$source_address" \
+			"$destination_address" "$family"
+	fi
 
 	if [ "$ADVERTISE_SSH" -eq 1 ]; then
 		instance="${HOSTNAME}"
 
-		payload=$(make_ptr_record_payload \
-			"_ssh._tcp" "$instance") || return 1
-		send_payload "$payload" "$source_address" \
-			"$destination_address" "$family" || return 1
-
-		payload=$(make_srv_record_payload \
-			"$instance" "_ssh._tcp" "$SSH_PORT" "$HOSTNAME") || return 1
-		send_payload "$payload" "$source_address" \
-			"$destination_address" "$family" || return 1
-
-		payload=$(make_txt_record_payload \
-			"$instance" "_ssh._tcp" "") || return 1
+		payload=$(make_service_announcement \
+			"$instance" "_ssh._tcp" "$SSH_PORT" "$HOSTNAME" "") || return 1
 		send_payload "$payload" "$source_address" \
 			"$destination_address" "$family" || return 1
 	fi
@@ -511,18 +543,8 @@ announce_address()
 	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
 		instance="${HOSTNAME}"
 
-		payload=$(make_ptr_record_payload \
-			"_http._tcp" "$instance") || return 1
-		send_payload "$payload" "$source_address" \
-			"$destination_address" "$family" || return 1
-
-		payload=$(make_srv_record_payload \
-			"$instance" "_http._tcp" "$HTTP_PORT" "$HOSTNAME") || return 1
-		send_payload "$payload" "$source_address" \
-			"$destination_address" "$family" || return 1
-
-		payload=$(make_txt_record_payload \
-			"$instance" "_http._tcp" "path=${HTTP_PATH}") || return 1
+		payload=$(make_service_announcement \
+			"$instance" "_http._tcp" "$HTTP_PORT" "$HOSTNAME" "path=${HTTP_PATH}") || return 1
 		send_payload "$payload" "$source_address" \
 			"$destination_address" "$family" || return 1
 	fi
@@ -625,10 +647,10 @@ Options:
   --ssh[=PORT]        Advertise SSH, default port 22.
 
 Environment:
+  INTERVAL            Announcement interval in seconds, default 60.
   ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
-  INTERVAL            Announcement interval, default 60.
-  USE_SOURCE_ADDRESS  Use nc -s, default 1.
-  DEBUG_LOG	          Log each announcement, default 0.
+  USE_SOURCE_ADDRESS  Use nc -s or socat bind, default 1.
+  DEBUG_LOG           Log each announcement, default 0.
 
 EOF
 
@@ -674,12 +696,10 @@ while [ "$1" != "--" ]; do
 			echo "$SCRIPT $VERSION"
 			usage 0
 			;;
-
 		--host)
 			shift
 			HOSTNAME=$1
 			;;
-
 		--http)
 			ADVERTISE_HTTP=1
 			if [ -n "$2" ]; then
@@ -687,7 +707,6 @@ while [ "$1" != "--" ]; do
 				shift
 			fi
 			;;
-
 		--ssh)
 			ADVERTISE_SSH=1
 			if [ -n "$2" ]; then
@@ -733,8 +752,13 @@ if [ "$DEBUG_LOG" -eq 1 ]; then
 	_logger "IPv6 announcements: ${ADVERTISE_IPV6}"
 	_logger "UDP sender: ${SEND_TOOL}"
 fi
+
 # Initial announcement burst.
-send_all_announcements
+# shellcheck disable=SC2034  # i unused on purpose
+for i in 1 2 3 4 5 6 7 8; do
+	send_all_announcements
+	sleep 0.2
+done
 sleep 1
 send_all_announcements
 sleep 2
