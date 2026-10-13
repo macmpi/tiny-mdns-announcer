@@ -16,7 +16,7 @@ It is a best-effort lightweight announcer, and is not intended as a replacement 
 
 ## Benefits:
 - extremely small footprint
-- runs under POSIX shell on Linux, *BSD, macOS, Windows
+- runs under POSIX shell
 - compatible with busybox's `nc`
 
 ## Setup procedure:
@@ -35,7 +35,6 @@ Options:
 Environment:
   INTERVAL            Announcement interval in seconds, default 60.
   ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
-  USE_SOURCE_ADDRESS  Use nc -s or socat bind, default 1.
   DEBUG_LOG           Log each announcement, default 0.
 ```
 Main execution steps are logged: `grep tiny-mdns-ann /var/log/messages`.
