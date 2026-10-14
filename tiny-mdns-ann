@@ -309,6 +309,38 @@ make_ptr_record_payload()
 
 
 # ----------------------------------------------------------------------
+# Build a single multi-question query packet
+# ----------------------------------------------------------------------
+
+make_combined_query_payload()
+{
+	question_count=0
+	query_records=""
+
+	if [ "$ADVERTISE_SSH" -eq 1 ]; then
+		service_hex=$(dns_name_hex "_ssh._tcp") || return 1
+		# Name + Type (PTR=000c) + Class (IN=0001)
+		query_records="${query_records}${service_hex}000c0001"
+		question_count=$((question_count + 1))
+	fi
+
+	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
+		service_hex=$(dns_name_hex "_http._tcp") || return 1
+		query_records="${query_records}${service_hex}000c0001"
+		question_count=$((question_count + 1))
+	fi
+
+	[ "$question_count" -gt 0 ] || return 1
+
+	# DNS Query Header: ID=0000, Flags=0000 (Query), QDCOUNT, ANCOUNT=0000, NSCOUNT=0000, ARCOUNT=0000
+	dns_qdcount_hex=$(printf '%04x' "$question_count") || return 1
+	dns_header="00000000${dns_qdcount_hex}000000000000"
+
+	packet_from_hex "${dns_header}${query_records}"
+}
+
+
+# ----------------------------------------------------------------------
 # Build a combined service announcement with PTR, SRV, and TXT in one packet.
 # This is a best-effort improvement for mDNS/DNS-SD clients that handle
 # grouped records more reliably than separate packets.
@@ -397,31 +429,6 @@ announce_service_types()
 
 
 # ----------------------------------------------------------------------
-# Send a one-shot mDNS query for a service type to "wake up" service
-# browsing on a virgin LAN. This is a best-effort compatibility aid.
-# ----------------------------------------------------------------------
-
-query_service_type()
-{
-	service_name=$1
-	source_address=$2
-	destination_address=$3
-	family=$4
-
-	service_hex=$(dns_name_hex "${service_name}.local") || return 1
-
-	# Header: one question, no flags, no answer
-	dns_header="000000000001000000000000"
-	dns_question="${service_hex}000c0001"
-
-	payload=$(packet_from_hex "${dns_header}${dns_question}")
-
-	send_payload "$payload" "$source_address" \
-		"$destination_address" "$family"
-}
-
-
-# ----------------------------------------------------------------------
 # Send an escaped packet through nc, or socat if available.
 # ----------------------------------------------------------------------
 
@@ -506,7 +513,7 @@ announce_address()
 	esac
 
 	if [ "$DEBUG_LOG" -eq 1 ]; then
-		_logger "Announcing ${HOSTNAME}.local -> ${ip_address} via ${iface} (IPv${family})"
+		_logger "Announcing records for ${HOSTNAME}.local -> ${ip_address} via ${iface} (IPv${family})"
 	fi
 
 	# Hostname announcement.
@@ -520,16 +527,13 @@ announce_address()
 	announce_service_types "$source_address" \
 		"$destination_address" "$family" || return 1
 
-	# A few self-queries to encourage service browsing on a virgin LAN.
-	if [ "$ADVERTISE_SSH" -eq 1 ]; then
-		query_service_type "_ssh._tcp" "$source_address" \
-			"$destination_address" "$family"
-	fi
-	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
-		query_service_type "_http._tcp" "$source_address" \
-			"$destination_address" "$family"
-	fi
+    # Combined Multi-Service Self-Queries
+    payload=$(make_combined_query_payload) && {
+        send_payload "$payload" "$source_address" \
+        	"$destination_address" "$family" || return 1
+    }
 
+	# Step 4: Individual Service Instance Records (PTR, SRV, TXT grouped natively)
 	if [ "$ADVERTISE_SSH" -eq 1 ]; then
 		instance="${HOSTNAME}"
 
