@@ -72,9 +72,9 @@ DNS_TTL=120
 
 ipv4_to_hex()
 {
-	ip_address=$1
+	local ip_address=$1
 
-	old_ifs=$IFS
+	local old_ifs=$IFS
 	IFS=.
 	# The value is obtained from ip(8).
 	# shellcheck disable=SC2086
@@ -95,7 +95,7 @@ ipv4_to_hex()
 
 ipv6_to_hex()
 {
-	ip_address=$1
+	local ip_address=$1
 
 	case "$ip_address" in
 		*/*|*%*)
@@ -187,8 +187,9 @@ EOF
 
 dns_name_hex()
 {
-	remaining=$1
-	encoded_name=""
+	local remaining=$1
+	local encoded_name=""
+	local label label_length label_hex
 
 	while [ -n "$remaining" ]; do
 		case "$remaining" in
@@ -225,9 +226,10 @@ dns_name_hex()
 
 packet_from_hex()
 {
-	hex_packet=$1
-	payload=""
-	offset=1
+	local hex_packet=$1
+	local payload=""
+	local offset=1
+	local byte
 
 	while [ "$offset" -le "${#hex_packet}" ]; do
 		byte=$(printf '%s' "$hex_packet" |
@@ -247,7 +249,10 @@ packet_from_hex()
 
 make_a_record_payload()
 {
-	ip_address=$1
+	local ip_address=$1
+
+	local address_hex name_hex ttl_hex
+	local dns_header dns_record
 
 	address_hex=$(ipv4_to_hex "$ip_address") || return 1
 	name_hex=$(dns_name_hex "${HOSTNAME}.local") || return 1
@@ -267,7 +272,10 @@ make_a_record_payload()
 
 make_aaaa_record_payload()
 {
-	ip_address=$1
+	local ip_address=$1
+
+	local address_hex name_hex ttl_hex
+	local dns_header dns_record
 
 	address_hex=$(ipv6_to_hex "$ip_address") || return 1
 	[ "${#address_hex}" -eq 32 ] || return 1
@@ -288,8 +296,11 @@ make_aaaa_record_payload()
 
 make_ptr_record_payload()
 {
-	service_name=$1
-	instance_name=$2
+	local service_name=$1
+	local instance_name=$2
+
+	local service_hex target_hex target_length target_length_hex ttl_hex
+	local dns_header dns_record
 
 	service_hex=$(dns_name_hex "${service_name}.local") || return 1
 	target_hex=$(dns_name_hex \
@@ -301,42 +312,11 @@ make_ptr_record_payload()
 
 	dns_header="000084000000000100000000"
 
+	# Uses 000c0001 (Shared Record) instead of 000c8001 (Cache Flush)
 	dns_record="${service_hex}000c0001${ttl_hex}"
 	dns_record=${dns_record}${target_length_hex}${target_hex}
 
 	packet_from_hex "${dns_header}${dns_record}"
-}
-
-
-# ----------------------------------------------------------------------
-# Build a single multi-question query packet
-# ----------------------------------------------------------------------
-
-make_combined_query_payload()
-{
-	question_count=0
-	query_records=""
-
-	if [ "$ADVERTISE_SSH" -eq 1 ]; then
-		service_hex=$(dns_name_hex "_ssh._tcp") || return 1
-		# Name + Type (PTR=000c) + Class (IN=0001)
-		query_records="${query_records}${service_hex}000c0001"
-		question_count=$((question_count + 1))
-	fi
-
-	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
-		service_hex=$(dns_name_hex "_http._tcp") || return 1
-		query_records="${query_records}${service_hex}000c0001"
-		question_count=$((question_count + 1))
-	fi
-
-	[ "$question_count" -gt 0 ] || return 1
-
-	# DNS Query Header: ID=0000, Flags=0000 (Query), QDCOUNT, ANCOUNT=0000, NSCOUNT=0000, ARCOUNT=0000
-	dns_qdcount_hex=$(printf '%04x' "$question_count") || return 1
-	dns_header="00000000${dns_qdcount_hex}000000000000"
-
-	packet_from_hex "${dns_header}${query_records}"
 }
 
 
@@ -348,11 +328,16 @@ make_combined_query_payload()
 
 make_service_announcement()
 {
-	instance_name=$1
-	service_name=$2
-	port=$3
-	target_host=$4
-	txt_value=$5
+	local instance_name=$1
+	local service_name=$2
+	local port=$3
+	local target_host=$4
+	local txt_value=$5
+
+	local service_hex target_hex target_length target_length_hex ttl_hex ptr_record
+	local name_hex port_hex record_length record_length_hex srv_record
+	local txt_bytes txt_length txt_hex txt_record_length txt_record_length_hex txt_record
+	local dns_header dns_packet
 
 	# Build PTR record
 	service_hex=$(dns_name_hex "${service_name}.local") || return 1
@@ -409,39 +394,33 @@ make_service_announcement()
 
 make_all_services_announcement()
 {
-	instance=$1
-	hostname=$2
+	local instance=$1
+	local hostname=$2
 
-	total_records=0
-	combined_hex=""
+	local total_records=0
+	local combined_hex=""
+	local tmp_payload tmp_hex
+	local dns_count_hex dns_header
 
-	# 1. Capture SSH if active
 	if [ "$ADVERTISE_SSH" -eq 1 ]; then
-		# Run original function natively
-		ssh_payload=$(make_service_announcement "$instance" "_ssh._tcp" "$SSH_PORT" "$hostname" "") || return 1
-
+		tmp_payload=$(make_service_announcement "$instance" "_ssh._tcp" "$SSH_PORT" "$hostname" "") || return 1
 		# Safe raw streaming to hex -> drop the first 12-byte DNS header (24 chars)
-		ssh_hex=$(printf '%b' "$ssh_payload" | od -An -tx1 | tr -d ' \n' | sed 's/^.\{24\}//')
-
-		combined_hex="${combined_hex}${ssh_hex}"
+		tmp_hex=$(printf '%b' "$tmp_payload" | od -An -tx1 | tr -d ' \n' | sed 's/^.\{24\}//')
+		combined_hex="${combined_hex}${tmp_hex}"
 		total_records=$((total_records + 3)) # Native builder always creates 3 records
 		fi
 
-	# 2. Capture HTTP if active
 	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
-		# Run original function natively
-		http_payload=$(make_service_announcement "$instance" "_http._tcp" "$HTTP_PORT" "$hostname" "path=${HTTP_PATH}") || return 1
-
+		tmp_payload=$(make_service_announcement "$instance" "_http._tcp" "$HTTP_PORT" "$hostname" "path=${HTTP_PATH}") || return 1
 		# Safe raw streaming to hex -> drop the first 12-byte DNS header (24 chars)
-		http_hex=$(printf '%b' "$http_payload" | od -An -tx1 | tr -d ' \n' | sed 's/^.\{24\}//')
-
-		combined_hex="${combined_hex}${http_hex}"
-		total_records=$((total_records + 3))
+		tmp_hex=$(printf '%b' "$tmp_payload" | od -An -tx1 | tr -d ' \n' | sed 's/^.\{24\}//')
+		combined_hex="${combined_hex}${tmp_hex}"
+		total_records=$((total_records + 3)) # Native builder always creates 3 records
 	fi
 
 	[ "$total_records" -gt 0 ] || return 1
 
-	# 3. Assemble unified multi-service DNS response header
+	# Assemble unified multi-service DNS response header
 	dns_count_hex=$(printf '%04x' "$total_records") || return 1
 	dns_header="000084000000${dns_count_hex}00000000"
 
@@ -457,9 +436,11 @@ make_all_services_announcement()
 
 announce_service_types()
 {
-	source_address=$1
-	destination_address=$2
-	family=$3
+	local source_address=$1
+	local destination_address=$2
+	local family=$3
+
+	local payload
 
 	if [ "$ADVERTISE_SSH" -eq 1 ]; then
 		payload=$(make_ptr_record_payload \
@@ -483,10 +464,12 @@ announce_service_types()
 
 send_payload()
 {
-	payload=$1
-	source_address=$2
-	destination_address=$3
-	family=$4
+	local payload=$1
+	local source_address=$2
+	local destination_address=$3
+	local family=$4
+
+	local  socat_target
 
 	if [ "$SEND_TOOL" = socat ]; then
 		case "$family" in
@@ -528,9 +511,11 @@ send_payload()
 
 announce_address()
 {
-	family=$1
-	iface=$2
-	ip_address=$3
+	local family=$1
+	local iface=$2
+	local ip_address=$3
+
+	local source_address destination_address payload
 
 	case "$family" in
 		4)
@@ -576,17 +561,11 @@ announce_address()
 	announce_service_types "$source_address" \
 		"$destination_address" "$family" || return 1
 
-    # Combined Multi-Service Self-Queries.
-    payload=$(make_combined_query_payload) && {
-        send_payload "$payload" "$source_address" \
-        	"$destination_address" "$family" || return 1
-    }
-
-    # Broadcast ALL service instances simultaneously in one packet.
-    payload=$(make_all_services_announcement "${HOSTNAME}" "${HOSTNAME}") && {
-    	send_payload "$payload" "$source_address" \
-    		"$destination_address" "$family" || return 1
-    }
+	# Broadcast ALL service instances simultaneously in one packet.
+	payload=$(make_all_services_announcement "${HOSTNAME}" "${HOSTNAME}") && {
+		send_payload "$payload" "$source_address" \
+			"$destination_address" "$family" || return 1
+	}
 }
 
 
