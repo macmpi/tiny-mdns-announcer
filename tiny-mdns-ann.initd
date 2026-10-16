@@ -10,6 +10,9 @@ command="/usr/bin/tiny-mdns-ann"
 command_background="yes"
 pidfile="/run/${RC_SVCNAME}.pid"
 
+# Use SIGINT as its default stop mechanism
+stopsig="INT"
+
 depend() {
 	use logger
 	need net

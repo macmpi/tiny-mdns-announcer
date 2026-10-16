@@ -41,8 +41,11 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 alias _logger='logger -st "$SCRIPT"'
-trap "exit 1" INT TERM
 
+# Ignore INT/TERM during execution of the trap to prevent recursion loop
+# Kill all background jobs attached to this shell session
+# Restore default handlers and exit cleanly
+trap 'trap "" INT TERM; kill 0; exit 0' INT TERM
 
 # ----------------------------------------------------------------------
 # Base configuration
@@ -785,14 +788,17 @@ for i in 1 2 3 4; do
 	send_all_announcements
 	sleep "$BURST_PAUSE"
 done
-sleep 1
+sleep 1 & # keep responsivenes to SIGINT
+wait $!
 send_all_announcements
-sleep 2
+sleep 2 &
+wait $!
 send_all_announcements
 
 # Periodic announcements.
 while :; do
-	sleep "$INTERVAL"
+	sleep "$INTERVAL" &
+	wait $!
 	send_all_announcements
 done
 

@@ -12,6 +12,7 @@ Conflicts=shutdown.target
 Type=simple
 EnvironmentFile=/etc/default/tiny-mdns-ann
 ExecStart=/usr/bin/tiny-mdns-ann
+KillSignal=SIGINT
 
 Restart=always
 RestartSec=5s
