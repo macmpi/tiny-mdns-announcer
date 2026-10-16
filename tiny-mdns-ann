@@ -252,31 +252,43 @@ packet_from_hex()
 
 
 # ----------------------------------------------------------------------
-# Build a PTR-record announcement.
+# Build a single packet containing PTR records for all active services
 # ----------------------------------------------------------------------
-
-make_ptr_record_payload()
+make_combined_ptr_payload()
 {
-	local service_name=$1
-	local instance_name=$2
-
+	local total_records=0
+	local combined_hex=""
 	local service_hex target_hex target_length target_length_hex
-	local dns_header dns_record
+	local dns_count_hex dns_header
 
-	service_hex=$(dns_name_hex "${service_name}.local") || return 1
-	target_hex=$(dns_name_hex \
-		"${instance_name}.${service_name}.local") || return 1
+	if [ "$ADVERTISE_SSH" -eq 1 ]; then
+		service_hex=$(dns_name_hex "_services._dns-sd._udp.local") || return 1
+		target_hex=$(dns_name_hex "_ssh._tcp.local") || return 1
+		target_length=$(( ${#target_hex} / 2 ))
+		target_length_hex=$(printf '%04x' "$target_length") || return 1
 
-	target_length=$(( ${#target_hex} / 2 ))
-	target_length_hex=$(printf '%04x' "$target_length") || return 1
+		combined_hex="${combined_hex}${service_hex}000c0001${TTL_HEX}${target_length_hex}${target_hex}"
+		total_records=$((total_records + 1))
+	fi
 
-	dns_header="000084000000000100000000"
+	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
+		service_hex=$(dns_name_hex "_services._dns-sd._udp.local") || return 1
+		target_hex=$(dns_name_hex "_http._tcp.local") || return 1
+		target_length=$(( ${#target_hex} / 2 ))
+		target_length_hex=$(printf '%04x' "$target_length") || return 1
 
-	# Uses 000c0001 (Shared Record) instead of 000c8001 (Cache Flush)
-	dns_record="${service_hex}000c0001${TTL_HEX}"
-	dns_record=${dns_record}${target_length_hex}${target_hex}
+		combined_hex="${combined_hex}${service_hex}000c0001${TTL_HEX}${target_length_hex}${target_hex}"
+		total_records=$((total_records + 1))
+	fi
 
-	packet_from_hex "${dns_header}${dns_record}"
+	[ "$total_records" -gt 0 ] || return 1
+
+	# Assemble DNS Header with the dynamic Answer Count
+	# 00008400 (Standard Response) -> 0000 (Questions) -> [total_records] (Answers)
+	dns_count_hex=$(printf '%04x' "$total_records")
+	dns_header="000084000000${dns_count_hex}00000000"
+
+	packet_from_hex "${dns_header}${combined_hex}"
 }
 
 
@@ -503,25 +515,14 @@ announce_address()
 			return 1
 		}
 
+	if [ -n "$COMBINED_PTR_PACKET" ]; then
 	# Service-type enumeration records.
-	if [ -n "$SSH_PTR_FULL_PACKET" ]; then
-		send_payload "$SSH_PTR_FULL_PACKET" "$source_address" \
+		send_payload "$COMBINED_PTR_PACKET" "$source_address" \
 			"$destination_address" "$family" || {
-				_logger "ERROR: ssh ptr announcement"
+				_logger " ERROR: unified ptr services announcement"
 				return 1
 			}
-	fi
-
-	if [ -n "$HTTP_PTR_FULL_PACKET" ]; then
-		send_payload "$HTTP_PTR_FULL_PACKET" "$source_address" \
-			"$destination_address" "$family" || {
-				_logger "ERROR: http ptr announcement"
-				return 1
-			}
-	fi
-
 	# Broadcast ALL service instances simultaneously in one packet.
-	if [ -n "$SERVICES" ] ; then
 		send_payload "$ALL_INSTANCES_FULL_PACKET" \
 			"$source_address" "$destination_address" "$family" || {
 				_logger "ERROR: services announcement"
@@ -758,21 +759,10 @@ A_FRAGMENT="${HOST_HEX}00018001${TTL_HEX}0004"
 AAAA_FRAGMENT="${HOST_HEX}001c8001${TTL_HEX}0010"
 
 # Separate Service Type Discoveries
-SSH_PTR_FULL_PACKET=""
-HTTP_PTR_FULL_PACKET=""
-SERVICES=
-if [ "$ADVERTISE_SSH" -eq 1 ]; then
-	SSH_PTR_FULL_PACKET=$(make_ptr_record_payload "_services._dns-sd._udp" "_ssh._tcp")
-	SERVICES=1
-fi
-
-if [ "$ADVERTISE_HTTP" -eq 1 ]; then
-	HTTP_PTR_FULL_PACKET=$(make_ptr_record_payload "_services._dns-sd._udp" "_http._tcp")
-	SERVICES=1
-fi
-
-# All Service Instances
-if [ -n "$SERVICES" ]; then
+COMBINED_PTR_PACKET=""
+ALL_INSTANCES_FULL_PACKET=""
+if [ "$ADVERTISE_SSH" -eq 1 ] || [ "$ADVERTISE_HTTP" -eq 1 ]; then
+	COMBINED_PTR_PACKET=$(make_combined_ptr_payload)
 	ALL_INSTANCES_FULL_PACKET=$(make_all_services_announcement "${HOSTNAME}" "${HOSTNAME}")
 fi
 
