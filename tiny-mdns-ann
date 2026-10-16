@@ -260,7 +260,7 @@ make_ptr_record_payload()
 	local service_name=$1
 	local instance_name=$2
 
-	local service_hex target_hex target_length target_length_hex ttl_hex
+	local service_hex target_hex target_length target_length_hex
 	local dns_header dns_record
 
 	service_hex=$(dns_name_hex "${service_name}.local") || return 1
@@ -269,12 +269,11 @@ make_ptr_record_payload()
 
 	target_length=$(( ${#target_hex} / 2 ))
 	target_length_hex=$(printf '%04x' "$target_length") || return 1
-	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
 
 	dns_header="000084000000000100000000"
 
 	# Uses 000c0001 (Shared Record) instead of 000c8001 (Cache Flush)
-	dns_record="${service_hex}000c0001${ttl_hex}"
+	dns_record="${service_hex}000c0001${TTL_HEX}"
 	dns_record=${dns_record}${target_length_hex}${target_hex}
 
 	packet_from_hex "${dns_header}${dns_record}"
@@ -295,7 +294,7 @@ make_service_announcement()
 	local target_host=$4
 	local txt_value=$5
 
-	local service_hex target_hex target_length target_length_hex ttl_hex ptr_record
+	local service_hex target_hex target_length target_length_hex ptr_record
 	local name_hex port_hex record_length record_length_hex srv_record
 	local txt_bytes txt_length txt_hex txt_record_length txt_record_length_hex txt_record
 	local dns_header dns_packet
@@ -306,9 +305,8 @@ make_service_announcement()
 		"${instance_name}.${service_name}.local") || return 1
 	target_length=$(( ${#target_hex} / 2 ))
 	target_length_hex=$(printf '%04x' "$target_length") || return 1
-	ttl_hex=$(printf '%08x' "$DNS_TTL") || return 1
 
-	ptr_record="${service_hex}000c0001${ttl_hex}"
+	ptr_record="${service_hex}000c0001${TTL_HEX}"
 	ptr_record=${ptr_record}${target_length_hex}${target_hex}
 
 	# Build SRV record
@@ -320,7 +318,7 @@ make_service_announcement()
 	record_length=$((6 + target_length))
 	record_length_hex=$(printf '%04x' "$record_length") || return 1
 
-	srv_record="${name_hex}00210001${ttl_hex}${record_length_hex}"
+	srv_record="${name_hex}00210001${TTL_HEX}${record_length_hex}"
 	srv_record=${srv_record}00000000${port_hex}${target_hex}
 
 	# Build TXT record
@@ -336,7 +334,7 @@ make_service_announcement()
 	txt_record_length=$(( ${#txt_hex} / 2 ))
 	txt_record_length_hex=$(printf '%04x' "$txt_record_length") || return 1
 
-	txt_record="${name_hex}00108001${ttl_hex}"
+	txt_record="${name_hex}00108001${TTL_HEX}"
 	txt_record=${txt_record}${txt_record_length_hex}${txt_hex}
 
 	# Three answer records in one packet.
@@ -752,11 +750,12 @@ fi
 # Packets pre-computation
 # ----------------------------------------------------------------------
 
-# Partial Hostname Headers
-ttl_hex=$(printf '%08x' "$DNS_TTL")
-A_FRAGMENT="$(dns_name_hex "${HOSTNAME}.local")00018001${ttl_hex}0004"
-AAAA_FRAGMENT="$(dns_name_hex "${HOSTNAME}.local")001c8001${ttl_hex}0010"
+TTL_HEX=$(printf '%08x' "$DNS_TTL")
 
+# Partial Hostname Headers
+HOST_HEX=$(dns_name_hex "$HOSTNAME.local")
+A_FRAGMENT="${HOST_HEX}00018001${TTL_HEX}0004"
+AAAA_FRAGMENT="${HOST_HEX}001c8001${TTL_HEX}0010"
 
 # Separate Service Type Discoveries
 SSH_PTR_FULL_PACKET=""
