@@ -42,6 +42,11 @@ fi
 
 alias _logger='logger -st "$SCRIPT"'
 
+# Ignore INT/TERM during execution of the trap to prevent recursion loop
+# Kill all background jobs attached to this shell session
+# Restore default handlers and exit cleanly
+trap 'trap "" INT TERM; kill 0; exit 0' INT TERM
+
 # ----------------------------------------------------------------------
 # Base configuration
 # ----------------------------------------------------------------------
@@ -288,109 +293,66 @@ make_combined_ptr_payload()
 
 
 # ----------------------------------------------------------------------
-# Build a combined service announcement with PTR, SRV, and TXT in one packet.
-# This is a best-effort improvement for mDNS/DNS-SD clients that handle
-# grouped records more reliably than separate packets.
-# ----------------------------------------------------------------------
-
-make_service_announcement()
-{
-	local instance_name=$1
-	local service_name=$2
-	local port=$3
-	local target_host=$4
-	local txt_value=$5
-
-	local service_hex target_hex target_length target_length_hex ptr_record
-	local name_hex port_hex record_length record_length_hex srv_record
-	local txt_bytes txt_length txt_hex txt_record_length txt_record_length_hex txt_record
-	local dns_header dns_packet
-
-	# Build PTR record
-	service_hex=$(dns_name_hex "${service_name}.local") || return 1
-	target_hex=$(dns_name_hex \
-		"${instance_name}.${service_name}.local") || return 1
-	target_length=$(( ${#target_hex} / 2 ))
-	target_length_hex=$(printf '%04x' "$target_length") || return 1
-
-	ptr_record="${service_hex}000c0001${TTL_HEX}"
-	ptr_record=${ptr_record}${target_length_hex}${target_hex}
-
-	# Build SRV record
-	name_hex=$(dns_name_hex \
-		"${instance_name}.${service_name}.local") || return 1
-	target_hex=$(dns_name_hex "${target_host}.local") || return 1
-	port_hex=$(printf '%04x' "$port") || return 1
-	target_length=$(( ${#target_hex} / 2 ))
-	record_length=$((6 + target_length))
-	record_length_hex=$(printf '%04x' "$record_length") || return 1
-
-	srv_record="${name_hex}00210001${TTL_HEX}${record_length_hex}"
-	srv_record=${srv_record}00000000${port_hex}${target_hex}
-
-	# Build TXT record
-	if [ -n "$txt_value" ]; then
-		txt_bytes=$(printf '%s' "$txt_value" |
-			od -An -tx1 | tr -d ' \n') || return 1
-		txt_length=$(printf '%02x' "${#txt_value}") || return 1
-		txt_hex=${txt_length}${txt_bytes}
-	else
-		txt_hex="00"
-	fi
-
-	txt_record_length=$(( ${#txt_hex} / 2 ))
-	txt_record_length_hex=$(printf '%04x' "$txt_record_length") || return 1
-
-	txt_record="${name_hex}00108001${TTL_HEX}"
-	txt_record=${txt_record}${txt_record_length_hex}${txt_hex}
-
-	# Three answer records in one packet.
-	dns_header="000084000000000300000000"
-	dns_packet="${dns_header}${ptr_record}${srv_record}${txt_record}"
-
-	packet_from_hex "$dns_packet"
-}
-
-
-# ----------------------------------------------------------------------
-# Build a single unified packet for ALL instances (SSH, HTTP, etc.)
-# Combines outputs of multiple native make_service_announcement calls
-# into a single, valid, high-speed multi-service payload.
+# Build a single unified packet for ALL services (SSH, HTTP, etc.)
+# It combines services announcement with PTR, SRV, and TXT within same  packet.
 # ----------------------------------------------------------------------
 
 make_all_services_announcement()
 {
-	local instance=$1
-	local hostname=$2
-
+	local instance="$1"
 	local total_records=0
 	local combined_hex=""
-	local tmp_payload tmp_hex
+	local srv_type port txt_val
+	local svc_hex inst_hex port_hex rec_len_hex
+	local txt_bytes txt_len txt_hex txt_rec_len_hex
 	local dns_count_hex dns_header
 
-	if [ "$ADVERTISE_SSH" -eq 1 ]; then
-		tmp_payload=$(make_service_announcement "$instance" "_ssh._tcp" "$SSH_PORT" "$hostname" "") || return 1
-		# Safe raw streaming to hex -> drop the first 12-byte DNS header (24 chars)
-		tmp_hex=$(printf '%b' "$tmp_payload" | od -An -tx1 | tr -d ' \n' | sed 's/^.\{24\}//')
-		combined_hex="${combined_hex}${tmp_hex}"
-		total_records=$((total_records + 3)) # Native builder always creates 3 records
+	# Loop through active services to build records linearly
+	for srv_type in ssh http; do
+		if [ "$srv_type" = "ssh" ] && [ "$ADVERTISE_SSH" -eq 1 ]; then
+			port="$SSH_PORT"
+			txt_val=""
+		elif [ "$srv_type" = "http" ] && [ "$ADVERTISE_HTTP" -eq 1 ]; then
+			port="$HTTP_PORT"
+			txt_val="path=${HTTP_PATH}"
+		else
+			continue
 		fi
 
-	if [ "$ADVERTISE_HTTP" -eq 1 ]; then
-		tmp_payload=$(make_service_announcement "$instance" "_http._tcp" "$HTTP_PORT" "$hostname" "path=${HTTP_PATH}") || return 1
-		# Safe raw streaming to hex -> drop the first 12-byte DNS header (24 chars)
-		tmp_hex=$(printf '%b' "$tmp_payload" | od -An -tx1 | tr -d ' \n' | sed 's/^.\{24\}//')
-		combined_hex="${combined_hex}${tmp_hex}"
-		total_records=$((total_records + 3)) # Native builder always creates 3 records
-	fi
+		# Compute DNS Labels
+		svc_hex=$(dns_name_hex "_${srv_type}._tcp.local") || return 1
+		inst_hex=$(dns_name_hex "${instance}._${srv_type}._tcp.local") || return 1
+		port_hex=$(printf '%04x' "$port") || return 1
+
+		# PTR Record (Service Name -> Instance Name)
+		rec_len_hex=$(printf '%04x' $(( ${#inst_hex} / 2 )))
+		combined_hex="${combined_hex}${svc_hex}000c0001${TTL_HEX}${rec_len_hex}${inst_hex}"
+
+		# SRV Record (Instance Name -> Target Host + Port)
+		# 6 fixed bytes for Priority(2) + Weight(2) + Port(2)
+		rec_len_hex=$(printf '%04x' $(( 6 + (${#HOST_HEX} / 2) )))
+		combined_hex="${combined_hex}${inst_hex}00210001${TTL_HEX}${rec_len_hex}00000000${port_hex}${HOST_HEX}"
+
+		# TXT Record (Instance Name -> Text Attributes)
+		if [ -n "$txt_val" ]; then
+			txt_bytes=$(printf '%s' "$txt_val" | od -An -tx1 | tr -d ' \n') || return 1
+			txt_len=$(printf '%02x' "${#txt_val}") || return 1
+			txt_hex="${txt_len}${txt_bytes}"
+		else
+			txt_hex="00"
+		fi
+		txt_rec_len_hex=$(printf '%04x' $(( ${#txt_hex} / 2 )))
+		combined_hex="${combined_hex}${inst_hex}00108001${TTL_HEX}${txt_rec_len_hex}${txt_hex}"
+
+		total_records=$((total_records + 3))
+	done
 
 	[ "$total_records" -gt 0 ] || return 1
 
-	# Assemble unified multi-service DNS response header
-	dns_count_hex=$(printf '%04x' "$total_records") || return 1
+	# Assemble complete DNS Response packet (12-byte header + records)
+	dns_count_hex=$(printf '%04x' "$total_records")
 	dns_header="000084000000${dns_count_hex}00000000"
 
-	# Re-encode combined hex safely into the final ready-to-send payload string
 	packet_from_hex "${dns_header}${combined_hex}"
 }
 
@@ -518,8 +480,8 @@ announce_address()
 				return 1
 			}
 	# Broadcast ALL service instances simultaneously in one packet.
-		send_payload "$ALL_INSTANCES_FULL_PACKET" \
-			"$source_address" "$destination_address" "$family" || {
+		send_payload "$ALL_INSTANCES_FULL_PACKET" "$source_address" \
+			"$destination_address" "$family" || {
 				_logger "ERROR: services announcement"
 				return 1
 			}
@@ -758,7 +720,7 @@ COMBINED_PTR_PACKET=""
 ALL_INSTANCES_FULL_PACKET=""
 if [ "$ADVERTISE_SSH" -eq 1 ] || [ "$ADVERTISE_HTTP" -eq 1 ]; then
 	COMBINED_PTR_PACKET=$(make_combined_ptr_payload)
-	ALL_INSTANCES_FULL_PACKET=$(make_all_services_announcement "${HOSTNAME}" "${HOSTNAME}")
+	ALL_INSTANCES_FULL_PACKET=$(make_all_services_announcement "${HOSTNAME}")
 fi
 
 
@@ -772,7 +734,7 @@ for i in 1 2 3 4; do
 	send_all_announcements
 	sleep "$BURST_PAUSE"
 done
-sleep 1 &
+sleep 1 & # keep responsiveness to SIGINT
 wait $!
 send_all_announcements
 sleep 2 &
