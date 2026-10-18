@@ -28,15 +28,15 @@ usage: tiny-mdns-ann [OPTIONS]
 Announce HOSTNAME.local over mDNS on active interfaces.
 
 Options:
-  --help              Show this help.
-  --host NAME         Host name to announce in the .local domain.
-  --http[=PORT]       Advertise HTTP, default port 80.
-  --ssh[=PORT]        Advertise SSH, default port 22.
+  --help                Show this help.
+  --host NAME           Host name to announce in the .local domain.
+  --http[=PORT[,PATH]]  Advertise HTTP, default port 80, path /.
+  --ssh[=PORT]          Advertise SSH, default port 22.
 
 Environment:
-  INTERVAL            Announcement interval in seconds, default 60.
-  ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
-  DEBUG_LOG           Log each announcement, default 0.
+  INTERVAL              Announcement interval in seconds, default 60.
+  ADVERTISE_IPV6        Enable IPv6 announcements, default 1.
+  DEBUG_LOG             Log each announcement, default 0.
 ```
 Main execution steps are logged: `grep tiny-mdns-ann /var/log/messages`.
 

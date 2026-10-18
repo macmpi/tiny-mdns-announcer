@@ -398,6 +398,7 @@ send_payload()
 				-w 1 \
 				"$destination_address" "$MDNS_PORT"
 		else
+			# this degraded mode may loose IPv4 services announcements
 			printf '%b' "$payload" | timeout "$NC_TIMEOUT" nc -u -p "$MDNS_PORT" \
 				-w 1 \
 				"$destination_address" "$MDNS_PORT"
@@ -579,15 +580,15 @@ usage: $SCRIPT [OPTIONS]
 Announce HOSTNAME.local over mDNS on active interfaces.
 
 Options:
-  --help              Show this help.
-  --host NAME         Host name to announce in the .local domain.
-  --http[=PORT]       Advertise HTTP, default port 80.
-  --ssh[=PORT]        Advertise SSH, default port 22.
+  --help                Show this help.
+  --host NAME           Host name to announce in the .local domain.
+  --http[=PORT[,PATH]]  Advertise HTTP, default port 80, path /.
+  --ssh[=PORT]          Advertise SSH, default port 22.
 
 Environment:
-  INTERVAL            Announcement interval in seconds, default 60.
-  ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
-  DEBUG_LOG           Log each announcement, default 0.
+  INTERVAL              Announcement interval in seconds, default 60.
+  ADVERTISE_IPV6        Enable IPv6 announcements, default 1.
+  DEBUG_LOG             Log each announcement, default 0.
 
 EOF
 
@@ -653,7 +654,11 @@ while [ "$1" != "--" ]; do
 		--http)
 			ADVERTISE_HTTP=1
 			if [ -n "$2" ]; then
-				HTTP_PORT=$2
+				HTTP_PORT="${2%%,*}"
+				: "${HTTP_PORT:=80}"
+				HTTP_PATH="${2#*,}"
+				[ "$HTTP_PATH" = "$2" ] && HTTP_PATH=""
+				: "${HTTP_PATH:=/}"
 				shift
 			fi
 			;;
