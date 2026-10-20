@@ -5,7 +5,8 @@
 Hostname can then be resolved by any machine supporting mDNS/Avahi LAN discovery.
 
 `tiny-mdns-ann` only depends on `netcat`, as found in `busybox`, or other standalone implementations.\
-It merely sends unsolicited UDP announcement packets, and does not answer queries as a full mDNS responder would.
+It merely sends unsolicited UDP announcement packets, and does not answer queries.\
+It is a best-effort lightweight announcer, and is not intended as a replacement for fully compliant mDNS responder.
 
 ## Features:
 - hostname LAN IP address resolution
@@ -16,7 +17,8 @@ It merely sends unsolicited UDP announcement packets, and does not answer querie
 ## Benefits:
 - extremely small footprint
 - runs under POSIX shell
-- compatible with busybox's bundled `netcat`
+- compatible with busybox's `nc`
+- leverages `socat` if available, for more robust announcements
 
 ## Setup procedure:
 Make script executable and run `tiny-mdns-ann` on device as follows:
@@ -26,22 +28,15 @@ usage: tiny-mdns-ann [OPTIONS]
 Announce HOSTNAME.local over mDNS on active interfaces.
 
 Options:
-  --help              Show this help.
-  --host NAME         Host name to announce in the .local domain.
-  --http[=PORT]       Advertise HTTP, default port 80.
-  --ssh[=PORT]        Advertise SSH, default port 22.
+  --help                Show this help.
+  --host NAME           Host name to announce in the .local domain.
+  --http[=PORT[,PATH]]  Advertise HTTP, default port 80, path /.
+  --ssh[=PORT]          Advertise SSH, default port 22.
 
 Environment:
-  ADVERTISE_IPV6      Enable IPv6 announcements, default 1.
-  INTERVAL            Announcement interval, default 60.
-  USE_SOURCE_ADDRESS  Use nc -s, default 1.
-  DEBUG_LOG	          Log each announcement, default 0.
-
-Notes:
-  IPv6 link-local multicast requires interface scoping; this is handled
-  automatically by the announcer.
-  BusyBox nc may not expose multicast TTL/hop-limit controls, so
-  announcements may not use the mDNS-required value of 255.
+  INTERVAL              Announcement interval in seconds, default 60.
+  ADVERTISE_IPV6        Enable IPv6 announcements, default 1.
+  DEBUG_LOG             Log each announcement, default 0.
 ```
 Main execution steps are logged: `grep tiny-mdns-ann /var/log/messages`.
 
@@ -49,6 +44,11 @@ OpenRC and Systemd services files are provided to run `tiny-mdns-ann` as a boot 
 A complete Alpine Linux [package](https://pkgs.alpinelinux.org/packages?name=tiny-mdns-announcer&branch=edge&repo=&arch=&origin=&flagged=&maintainer=) is also in the works.
 
 [![Packaging status](https://repology.org/badge/vertical-allrepos/tiny-mdns-announcer.svg)](https://repology.org/project/tiny-mdns-announcer/versions)
+
+*Note & limitations:*
+- As `nc` does not allow multicast `ttl`/`hop-limit` controls, announcements do not set mDNS-required value of 255, but work just fine in most cases.
+- If `socat` is available, it is used in place of `nc` to send announcements with `ttl`/`hop-limit` 255.
+- hosts with advanced networking routing setup or firewall may need to adapt settings to let mdns port 5353 free for sending announcements.
 
 ##
 <a href='https://ko-fi.com/V7V81B2UF6' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi5.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
